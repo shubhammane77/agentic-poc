@@ -19,6 +19,12 @@ def _config() -> AppConfig:
     return AppConfig.load()
 
 
+def _remove_merge_blockers(clone_path: Path) -> None:
+    blocker = clone_path / "coverage.xml"
+    if blocker.exists() and blocker.is_file():
+        blocker.unlink()
+
+
 def main() -> None:
     app()
 
@@ -124,6 +130,7 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
         if commit_hash and decision.commit_hash != commit_hash:
             remaining.append(decision)
             continue
+        _remove_merge_blockers(clone_path)
         result = run_command(["git", "cherry-pick", decision.commit_hash], cwd=clone_path)
         if result.ok:
             integrated += 1

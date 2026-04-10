@@ -47,6 +47,11 @@ class SafeToolset:
     def maven_logs_dir(self) -> Path:
         return self.context.logger.logs_dir / "maven"
 
+    def _remove_merge_blockers(self) -> None:
+        blocker = self.context.clone_root / "coverage.xml"
+        if blocker.exists() and blocker.is_file():
+            blocker.unlink()
+
     def _resolve_active_path(self, path_value: str) -> Path:
         path = Path(path_value)
         resolved = path if path.is_absolute() else (self.active_root / path)
@@ -206,6 +211,7 @@ class SafeToolset:
             subagent_id=self.context.subagent_id,
             details={"commit_hash": commit_hash},
         ) as step:
+            self._remove_merge_blockers()
             command = ["git", "cherry-pick", commit_hash]
             result = run_command(command, cwd=self.context.clone_root)
             if not result.ok:

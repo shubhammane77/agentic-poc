@@ -12,3 +12,5 @@ build/
 tmp/
 logs/
 artifacts/
+mlflow.db
+uv.lock
