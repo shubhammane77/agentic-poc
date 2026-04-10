@@ -46,6 +46,7 @@ class AppConfig:
     java_home: str = ""
     maven_home: str = ""
     mvn_bin: str = ""
+    maven_settings_xml: str = ""
     max_parallel_subagents: int = 2
     max_subagent_iterations: int = 3
     auto_integrate_successful_worktrees: bool = False
@@ -63,6 +64,7 @@ class AppConfig:
             java_home=os.getenv("JAVA_HOME", "").strip(),
             maven_home=os.getenv("MAVEN_HOME", "").strip(),
             mvn_bin=os.getenv("MVN_BIN", "").strip(),
+            maven_settings_xml=os.getenv("MAVEN_SETTINGS_XML", "").strip(),
             max_parallel_subagents=int_from_env(os.getenv("MAX_PARALLEL_SUBAGENTS"), 2),
             max_subagent_iterations=int_from_env(os.getenv("MAX_SUBAGENT_ITERATIONS"), 3),
             auto_integrate_successful_worktrees=bool_from_env(
@@ -101,3 +103,10 @@ class AppConfig:
         if self.java_home:
             return str(Path(self.java_home) / "bin" / f"java{suffix}")
         return f"java{suffix}"
+
+    def maven_command(self, *args: str) -> list[str]:
+        command = [self.maven_executable()]
+        if self.maven_settings_xml:
+            command.extend(["-s", self.maven_settings_xml])
+        command.extend(args)
+        return command

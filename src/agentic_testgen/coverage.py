@@ -38,13 +38,12 @@ class CoverageAnalyzer:
         if self.config.maven_home:
             env["MAVEN_HOME"] = self.config.maven_home
         result = run_command(
-            [
-                self.config.maven_executable(),
+            self.config.maven_command(
                 "-q",
                 "-DskipTests=false",
                 "test",
                 "jacoco:report",
-            ],
+            ),
             cwd=repo_root,
             env=env,
         )

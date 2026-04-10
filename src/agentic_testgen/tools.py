@@ -212,10 +212,11 @@ class SafeToolset:
             while module_root != self.active_root and not (module_root / "pom.xml").exists():
                 module_root = module_root.parent
             cmd = [
-                self.context.config.maven_executable(),
-                "-q",
-                f"-Dtest={class_name}",
-                "test",
+                *self.context.config.maven_command(
+                    "-q",
+                    f"-Dtest={class_name}",
+                    "test",
+                )
             ]
             result = run_command(cmd, cwd=module_root)
             self.context.last_single_test_exit_code = result.exit_code

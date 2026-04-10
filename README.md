@@ -43,6 +43,7 @@ cp .env.example .env
 - `JAVA_HOME`
 - `MAVEN_HOME`
 - optional `MVN_BIN`
+- optional `MAVEN_SETTINGS_XML`
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`
@@ -151,6 +152,7 @@ Copy the values you need into `.env` or export them directly:
 - `JAVA_HOME`
 - `MAVEN_HOME`
 - `MVN_BIN`
+- `MAVEN_SETTINGS_XML`
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`

@@ -539,7 +539,13 @@ class DaddySubagentsReflectiveWorkflow:
                     prompt_hash=prompt_hash(objective),
                     tool_call_summary=tool_summary,
                     generated_test_file=generated_file or None,
-                    single_test_command=f"{self.config.maven_executable()} -q -Dtest={Path(generated_file).stem if generated_file else '<none>'} test",
+                    single_test_command=" ".join(
+                        self.config.maven_command(
+                            "-q",
+                            f"-Dtest={Path(generated_file).stem if generated_file else '<none>'}",
+                            "test",
+                        )
+                    ),
                     status=status,
                     failure_summary="" if status == "passed" else validation_output[:4000],
                     reflective_summary=reflective_summary[:4000],
