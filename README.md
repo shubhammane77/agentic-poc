@@ -44,6 +44,7 @@ cp .env.example .env
 - `MAVEN_HOME`
 - optional `MVN_BIN`
 - optional `MAVEN_SETTINGS_XML`
+- optional `MAX_FILES_PER_RUN`
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`
@@ -69,6 +70,12 @@ Run the workflow with `uv`:
 
 ```bash
 uv run python -m agentic_testgen run --repo-url https://gitlab.example.com/group/project.git
+```
+
+For a controlled trial run, the workflow limits itself to the top 5 files by default. You can override that from the CLI:
+
+```bash
+uv run testgen run --repo-url https://gitlab.example.com/group/project.git --max-files 5
 ```
 
 You can also use the generated script entrypoint:
@@ -153,6 +160,7 @@ Copy the values you need into `.env` or export them directly:
 - `MAVEN_HOME`
 - `MVN_BIN`
 - `MAVEN_SETTINGS_XML`
+- `MAX_FILES_PER_RUN=5`
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`

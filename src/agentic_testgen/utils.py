@@ -50,6 +50,28 @@ def write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
+def write_command_logs(base_dir: Path, prefix: str, result: "CommandResult") -> dict[str, str]:
+    ensure_dir(base_dir)
+    stem = f"{slugify(prefix)}-{uuid.uuid4().hex[:8]}"
+    stdout_path = base_dir / f"{stem}.stdout.log"
+    stderr_path = base_dir / f"{stem}.stderr.log"
+    combined_path = base_dir / f"{stem}.combined.log"
+    stdout_path.write_text(result.stdout, encoding="utf-8")
+    stderr_path.write_text(result.stderr, encoding="utf-8")
+    combined_path.write_text(
+        f"COMMAND: {sanitize_command(result.args)}\n"
+        f"EXIT_CODE: {result.exit_code}\n"
+        f"DURATION_SECONDS: {result.duration_seconds:.3f}\n\n"
+        f"STDOUT:\n{result.stdout}\n\nSTDERR:\n{result.stderr}\n",
+        encoding="utf-8",
+    )
+    return {
+        "stdout": str(stdout_path),
+        "stderr": str(stderr_path),
+        "combined": str(combined_path),
+    }
+
+
 def read_json(path: Path, default: Any = None) -> Any:
     if not path.exists():
         return default

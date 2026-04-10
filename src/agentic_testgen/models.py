@@ -47,6 +47,29 @@ class CoverageRecord:
 
 
 @dataclass
+class GlobalCoverageSummary:
+    covered_lines: int
+    missed_lines: int
+    coverage_percent: float
+    report_count: int = 0
+
+    def to_json(self) -> dict[str, Any]:
+        return _jsonify(self)
+
+
+@dataclass
+class CoverageComparison:
+    before: GlobalCoverageSummary
+    after: GlobalCoverageSummary
+    percentage_increase: float
+    covered_line_increase: int
+    missed_line_reduction: int
+
+    def to_json(self) -> dict[str, Any]:
+        return _jsonify(self)
+
+
+@dataclass
 class FileWorkItem:
     file_path: str
     module: str
@@ -125,6 +148,7 @@ class IntegrationDecision:
     status: str
     file_path: str
     reason: str
+    priority_rank: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return _jsonify(self)
@@ -223,6 +247,7 @@ class WorkflowRunResult:
     overview_path: str
     workbook_path: str
     summary_path: str
+    coverage_comparison_path: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return _jsonify(self)

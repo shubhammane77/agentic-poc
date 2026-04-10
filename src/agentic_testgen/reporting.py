@@ -4,7 +4,14 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from agentic_testgen.models import AttemptRecord, FileWorkItem, ModelEvalResult, RepoContext, SubagentResult
+from agentic_testgen.models import (
+    AttemptRecord,
+    CoverageComparison,
+    FileWorkItem,
+    ModelEvalResult,
+    RepoContext,
+    SubagentResult,
+)
 from agentic_testgen.utils import ensure_dir, write_json
 
 
@@ -53,6 +60,7 @@ class ReportWriter:
         work_items: list[FileWorkItem],
         results: list[SubagentResult],
         model_eval: list[ModelEvalResult],
+        coverage_comparison: CoverageComparison | None = None,
     ) -> Path:
         path = self.artifacts_dir / "summary.json"
         write_json(
@@ -62,7 +70,38 @@ class ReportWriter:
                 "files": [item.to_json() for item in work_items],
                 "results": [item.to_json() for item in results],
                 "model_eval": [item.to_json() for item in model_eval],
+                "coverage_comparison": coverage_comparison.to_json() if coverage_comparison else None,
             },
+        )
+        return path
+
+    def write_coverage_comparison(self, comparison: CoverageComparison) -> Path:
+        path = self.artifacts_dir / "coverage-comparison.md"
+        path.write_text(
+            "\n".join(
+                [
+                    "# Coverage Comparison",
+                    "",
+                    f"- Before coverage: {comparison.before.coverage_percent}%",
+                    f"- After coverage: {comparison.after.coverage_percent}%",
+                    f"- Percentage increase: {comparison.percentage_increase}%",
+                    f"- Covered line increase: {comparison.covered_line_increase}",
+                    f"- Missed line reduction: {comparison.missed_line_reduction}",
+                    "",
+                    "## Before",
+                    "",
+                    f"- Covered lines: {comparison.before.covered_lines}",
+                    f"- Missed lines: {comparison.before.missed_lines}",
+                    f"- Coverage reports parsed: {comparison.before.report_count}",
+                    "",
+                    "## After",
+                    "",
+                    f"- Covered lines: {comparison.after.covered_lines}",
+                    f"- Missed lines: {comparison.after.missed_lines}",
+                    f"- Coverage reports parsed: {comparison.after.report_count}",
+                ]
+            ),
+            encoding="utf-8",
         )
         return path
 
@@ -72,6 +111,7 @@ class ReportWriter:
         work_items: list[FileWorkItem],
         attempts: list[AttemptRecord],
         model_eval: list[ModelEvalResult],
+        coverage_comparison: CoverageComparison | None = None,
     ) -> Path:
         output = self.artifacts_dir / "results.xlsx"
         sheets = {
@@ -117,6 +157,13 @@ class ReportWriter:
                 "iteration_count",
                 "estimated_cost",
                 "error_message",
+            ]],
+            "coverage_summary": [[
+                "before_percent",
+                "after_percent",
+                "percentage_increase",
+                "covered_line_increase",
+                "missed_line_reduction",
             ]],
         }
 
@@ -174,6 +221,17 @@ class ReportWriter:
                 ]
             )
 
+        if coverage_comparison:
+            sheets["coverage_summary"].append(
+                [
+                    coverage_comparison.before.coverage_percent,
+                    coverage_comparison.after.coverage_percent,
+                    coverage_comparison.percentage_increase,
+                    coverage_comparison.covered_line_increase,
+                    coverage_comparison.missed_line_reduction,
+                ]
+            )
+
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as zf:
             zf.writestr(
                 "[Content_Types].xml",
@@ -189,6 +247,7 @@ class ReportWriter:
                 '<Override PartName="/xl/worksheets/sheet2.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 "</Types>",
             )
             zf.writestr(
@@ -227,6 +286,7 @@ class ReportWriter:
                 '<sheet name="files" sheetId="2" r:id="rId2"/>'
                 '<sheet name="attempts" sheetId="3" r:id="rId3"/>'
                 '<sheet name="model_eval" sheetId="4" r:id="rId4"/>'
+                '<sheet name="coverage_summary" sheetId="5" r:id="rId5"/>'
                 "</sheets>"
                 "</workbook>",
             )
@@ -238,7 +298,8 @@ class ReportWriter:
                 '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet2.xml"/>'
                 '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>'
                 '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>'
-                '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>'
+                '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
                 "</Relationships>",
             )
             zf.writestr(

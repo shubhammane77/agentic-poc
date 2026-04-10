@@ -47,6 +47,7 @@ class AppConfig:
     maven_home: str = ""
     mvn_bin: str = ""
     maven_settings_xml: str = ""
+    max_files_per_run: int = 5
     max_parallel_subagents: int = 2
     max_subagent_iterations: int = 3
     auto_integrate_successful_worktrees: bool = False
@@ -65,6 +66,7 @@ class AppConfig:
             maven_home=os.getenv("MAVEN_HOME", "").strip(),
             mvn_bin=os.getenv("MVN_BIN", "").strip(),
             maven_settings_xml=os.getenv("MAVEN_SETTINGS_XML", "").strip(),
+            max_files_per_run=int_from_env(os.getenv("MAX_FILES_PER_RUN"), 5),
             max_parallel_subagents=int_from_env(os.getenv("MAX_PARALLEL_SUBAGENTS"), 2),
             max_subagent_iterations=int_from_env(os.getenv("MAX_SUBAGENT_ITERATIONS"), 3),
             auto_integrate_successful_worktrees=bool_from_env(

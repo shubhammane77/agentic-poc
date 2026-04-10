@@ -9,7 +9,7 @@ import dspy
 from agentic_testgen.config import AppConfig
 from agentic_testgen.coverage import CoverageAnalyzer
 from agentic_testgen.logging import RunLogger
-from agentic_testgen.utils import run_command, sanitize_command
+from agentic_testgen.utils import run_command, sanitize_command, write_command_logs
 
 
 @dataclass
@@ -36,11 +36,19 @@ class SafeToolset:
     def active_root(self) -> Path:
         return self.context.active_worktree or self.context.repo_root
 
+    @property
+    def active_root_resolved(self) -> Path:
+        return self.active_root.resolve()
+
+    @property
+    def maven_logs_dir(self) -> Path:
+        return self.context.logger.logs_dir / "maven"
+
     def _resolve_active_path(self, path_value: str) -> Path:
         path = Path(path_value)
         resolved = path if path.is_absolute() else (self.active_root / path)
         resolved = resolved.resolve()
-        if not str(resolved).startswith(str(self.active_root.resolve())):
+        if not str(resolved).startswith(str(self.active_root_resolved)):
             raise ValueError(f"Path outside allowed root: {path_value}")
         return resolved
 
@@ -49,6 +57,17 @@ class SafeToolset:
             if candidate.is_dir():
                 return candidate
         return self.active_root / "src" / "test" / "java"
+
+    def _is_within_test_tree(self, target: Path) -> bool:
+        try:
+            relative = target.relative_to(self.active_root_resolved)
+        except ValueError:
+            return False
+        parts = relative.parts
+        for index in range(len(parts) - 2):
+            if parts[index : index + 3] == ("src", "test", "java"):
+                return True
+        return False
 
     def read_file(self, file_path: str) -> str:
         with self.context.logger.step(
@@ -59,7 +78,7 @@ class SafeToolset:
         ) as step:
             target = self._resolve_active_path(file_path)
             content = target.read_text(encoding="utf-8")
-            step["summary"] = f"Read {target.relative_to(self.active_root)}"
+            step["summary"] = f"Read {target.relative_to(self.active_root_resolved)}"
             step["resolved_path"] = str(target)
             step["chars"] = len(content)
             return content
@@ -72,7 +91,7 @@ class SafeToolset:
             details={"requested_path": file_path},
         ) as step:
             target = self._resolve_active_path(file_path)
-            relative = str(target.relative_to(self.active_root))
+            relative = str(target.relative_to(self.active_root_resolved))
             step["summary"] = f"Resolved {relative}"
             step["resolved_path"] = str(target)
             return relative
@@ -92,7 +111,7 @@ class SafeToolset:
                     continue
                 lines.append(str(path.relative_to(root)))
             summary = "\n".join(lines[:500])
-            step["summary"] = f"Listed {root.relative_to(self.active_root)}"
+            step["summary"] = f"Listed {root.relative_to(self.active_root_resolved)}"
             step["resolved_path"] = str(root)
             step["entry_count"] = len(lines)
             step["preview"] = lines[:20]
@@ -119,26 +138,25 @@ class SafeToolset:
             step["output_preview"] = output[:500]
             return output[:5000]
 
-    def write_new_test_file(self, relative_path: str, content: str) -> str:
+    def write_new_test_file(self, file_path: str, content: str) -> str:
         with self.context.logger.step(
             "tool.write_new_test_file",
             subagent_id=self.context.subagent_id,
-            file_path=relative_path,
-            details={"requested_path": relative_path, "content_chars": len(content)},
+            file_path=file_path,
+            details={"requested_path": file_path, "content_chars": len(content)},
         ) as step:
-            test_root = self._test_root().resolve()
-            target = (self.active_root / relative_path).resolve()
-            if not str(target).startswith(str(test_root)):
+            target = self._resolve_active_path(file_path)
+            if not self._is_within_test_tree(target):
                 raise ValueError("write_new_test_file may only write inside src/test/java")
             if target.exists():
-                raise ValueError(f"Refusing to overwrite existing file: {relative_path}")
+                raise ValueError(f"Refusing to overwrite existing file: {file_path}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            relative = str(target.relative_to(self.active_root))
+            relative = str(target.relative_to(self.active_root_resolved))
             self.context.written_files.append(relative)
             step["summary"] = f"Wrote {relative}"
             step["resolved_path"] = str(target)
-            step["test_root"] = str(test_root)
+            step["allowed_test_tree"] = "src/test/java"
             return relative
 
     def create_worktree(self, worktree_path: str, branch_name: str) -> str:
@@ -219,6 +237,11 @@ class SafeToolset:
                 )
             ]
             result = run_command(cmd, cwd=module_root)
+            log_paths = write_command_logs(
+                self.maven_logs_dir,
+                f"{self.context.subagent_id or 'run'}-{class_name}-single-test",
+                result,
+            )
             self.context.last_single_test_exit_code = result.exit_code
             output = (result.stdout + "\n" + result.stderr).strip()
             step["summary"] = f"Ran {class_name}"
@@ -228,6 +251,7 @@ class SafeToolset:
             step["exit_code"] = result.exit_code
             step["stdout_preview"] = result.stdout[:500]
             step["stderr_preview"] = result.stderr[:500]
+            step["maven_log_paths"] = log_paths
             return output
 
     def run_project_tests_with_coverage(self) -> str:
@@ -236,13 +260,18 @@ class SafeToolset:
             subagent_id=self.context.subagent_id,
             details={"repo_root": str(self.active_root)},
         ) as step:
-            result, reports = self.coverage.run_tests_with_coverage(self.active_root)
+            result, reports, log_paths = self.coverage.run_tests_with_coverage(
+                self.active_root,
+                maven_logs_dir=self.maven_logs_dir,
+                log_prefix=f"{self.context.subagent_id or 'run'}-project-coverage",
+            )
             self.context.last_project_test_exit_code = result.exit_code
             step["summary"] = f"Reports: {len(reports)}"
             step["exit_code"] = result.exit_code
             step["stdout_preview"] = result.stdout[:500]
             step["stderr_preview"] = result.stderr[:500]
             step["report_paths"] = [item.report_path for item in reports[:10]]
+            step["maven_log_paths"] = log_paths
             return f"{result.stdout}\n{result.stderr}".strip()
 
     def cleanup_worktree(self) -> None:

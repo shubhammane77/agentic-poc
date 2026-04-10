@@ -24,15 +24,16 @@ def main() -> None:
 
 
 @app.command()
-def run(repo_url: str, run_id: str | None = None) -> None:
+def run(repo_url: str, run_id: str | None = None, max_files: int | None = None) -> None:
     """Run the daddy_subagents_reflective workflow against a GitLab repo."""
     config = _config()
     workflow = DaddySubagentsReflectiveWorkflow(config)
-    result = workflow.run_from_gitlab(repo_url, run_id=run_id)
+    result = workflow.run_from_gitlab(repo_url, run_id=run_id, max_files=max_files)
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"overview={result.overview_path}")
     typer.echo(f"workbook={result.workbook_path}")
     typer.echo(f"subagent_results={len(result.subagent_results)}")
+    typer.echo(f"work_items={len(result.work_items)}")
 
 
 @app.command()
@@ -92,7 +93,7 @@ def review(run_id: str) -> None:
     pending = read_json(workspace.integrations_path, default=[])
     for item in pending:
         typer.echo(
-            f"{item['status']} subagent={item['subagent_id']} commit={item['commit_hash'][:7]} file={item['file_path']}"
+            f"rank={item.get('priority_rank', 0)} {item['status']} subagent={item['subagent_id']} commit={item['commit_hash'][:7]} file={item['file_path']}"
         )
     if not pending:
         typer.echo("No pending integrations.")
@@ -103,11 +104,13 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
     """Apply queued integrations into the cloned parent checkout."""
     config = _config()
     workspace = WorkspaceManager(config.workspace_root).create(run_id)
-    checkpoint = CheckpointStore(workspace.checkpoints_dir).load()
+    checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
+    checkpoint = checkpoint_store.load()
     if not checkpoint:
         raise typer.Exit(code=1)
     clone_path = Path(checkpoint.metadata["clone_path"])
     pending = [IntegrationDecision(**item) for item in read_json(workspace.integrations_path, default=[])]
+    pending = sorted(pending, key=lambda item: (item.priority_rank or 0, item.file_path, item.commit_hash))
     remaining: list[IntegrationDecision] = []
     integrated = 0
     for decision in pending:
@@ -117,13 +120,30 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
         result = run_command(["git", "cherry-pick", decision.commit_hash], cwd=clone_path)
         if result.ok:
             integrated += 1
+            for completed in checkpoint.completed_results:
+                if completed.commit_hash == decision.commit_hash:
+                    completed.integration_status = "integrated"
         else:
             decision.status = "integration_failed"
             decision.reason = result.stderr or result.stdout
             remaining.append(decision)
+            for completed in checkpoint.completed_results:
+                if completed.commit_hash == decision.commit_hash:
+                    completed.integration_status = "integration_failed"
+                    completed.error_message = decision.reason
     write_json(workspace.integrations_path, [item.to_json() for item in remaining])
+    checkpoint.pending_integrations = remaining
+    checkpoint_store.save(checkpoint)
     typer.echo(f"integrated={integrated}")
     typer.echo(f"remaining={len(remaining)}")
+    if integrated > 0:
+        workflow = DaddySubagentsReflectiveWorkflow(config)
+        comparison = workflow.rerun_after_merge_coverage(run_id)
+        if comparison:
+            typer.echo(f"coverage_before={comparison.before.coverage_percent}")
+            typer.echo(f"coverage_after={comparison.after.coverage_percent}")
+            typer.echo(f"coverage_increase={comparison.percentage_increase}")
+            typer.echo(f"coverage_report={workspace.artifacts_dir / 'coverage-comparison.md'}")
 
 
 @app.command(name="eval")

@@ -15,7 +15,9 @@ from agentic_testgen.gitlab import GitLabRepositoryManager
 from agentic_testgen.logging import RunLogger
 from agentic_testgen.models import (
     AttemptRecord,
+    CoverageComparison,
     FileWorkItem,
+    GlobalCoverageSummary,
     IntegrationDecision,
     ModelDefinition,
     RepoContext,
@@ -123,7 +125,13 @@ class DaddySubagentsReflectiveWorkflow:
         self.workspace_manager = WorkspaceManager(config.workspace_root)
         self.coverage = CoverageAnalyzer(config)
 
-    def run_from_gitlab(self, repo_url: str, run_id: str | None = None) -> WorkflowRunResult:
+    def run_from_gitlab(
+        self,
+        repo_url: str,
+        run_id: str | None = None,
+        *,
+        max_files: int | None = None,
+    ) -> WorkflowRunResult:
         self.config.validate_for_run()
         run_id = run_id or new_run_id()
         workspace = self.workspace_manager.create(run_id)
@@ -154,6 +162,7 @@ class DaddySubagentsReflectiveWorkflow:
                 logger=logger,
                 tracer=tracer,
                 model_override=None,
+                max_files=max_files,
             )
 
     def run_from_local_path(
@@ -164,6 +173,7 @@ class DaddySubagentsReflectiveWorkflow:
         source_name: str | None = None,
         selected_files: list[str] | None = None,
         model_override: ModelDefinition | None = None,
+        max_files: int | None = None,
     ) -> WorkflowRunResult:
         run_id = run_id or new_run_id("eval")
         workspace = self.workspace_manager.create(run_id)
@@ -193,6 +203,7 @@ class DaddySubagentsReflectiveWorkflow:
                 tracer=tracer,
                 model_override=model_override,
                 selected_files=selected_files,
+                max_files=max_files,
             )
 
     def resume(self, run_id: str) -> WorkflowRunResult:
@@ -220,6 +231,7 @@ class DaddySubagentsReflectiveWorkflow:
         results = checkpoint.completed_results[:]
         work_items = checkpoint.pending_work_items[:]
         attempts = [attempt for result in results for attempt in result.attempts]
+        coverage_comparison = self._coverage_comparison_from_metadata(checkpoint.metadata)
         with tracer.run(
             f"workflow-resume-{run_id}",
             tags={"workflow": "daddy_subagents_reflective", "source_type": repo_context.source_type, "run_id": run_id},
@@ -239,8 +251,20 @@ class DaddySubagentsReflectiveWorkflow:
                 paused=False,
             )
             overview_path = workspace.artifacts_dir / "overview.md"
-            workbook_path = report_writer.write_workbook(repo_context, [], attempts, [])
-            summary_path = report_writer.write_json_summary(repo_context, [], results, [])
+            workbook_path = report_writer.write_workbook(
+                repo_context,
+                work_items,
+                attempts,
+                [],
+                coverage_comparison=coverage_comparison,
+            )
+            summary_path = report_writer.write_json_summary(
+                repo_context,
+                work_items,
+                results,
+                [],
+                coverage_comparison=coverage_comparison,
+            )
             tracer.log_metrics(
                 {
                     "attempt_count": len(attempts),
@@ -259,6 +283,7 @@ class DaddySubagentsReflectiveWorkflow:
                 overview_path=str(overview_path),
                 workbook_path=str(workbook_path),
                 summary_path=str(summary_path),
+                coverage_comparison_path=checkpoint.metadata.get("coverage_comparison_path"),
             )
 
     def _execute(
@@ -274,6 +299,7 @@ class DaddySubagentsReflectiveWorkflow:
         tracer: MlflowTracer,
         model_override: ModelDefinition | None,
         selected_files: list[str] | None = None,
+        max_files: int | None = None,
     ) -> WorkflowRunResult:
         checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
         runtime = DSPyRuntime(self.config, logger, model_override=model_override)
@@ -315,13 +341,21 @@ class DaddySubagentsReflectiveWorkflow:
             paused=False,
         )
         with logger.step("coverage.run") as step:
-            coverage_result, coverage_records = self.coverage.run_tests_with_coverage(repo_root)
+            coverage_result, coverage_records, maven_log_paths = self.coverage.run_tests_with_coverage(
+                repo_root,
+                maven_logs_dir=workspace.logs_dir / "maven",
+                log_prefix="daddy-project-coverage",
+            )
+            baseline_summary = self.coverage.summarize_global_coverage(coverage_records)
             work_items = self.coverage.build_work_items(coverage_records)
             if selected_files:
                 selected = set(selected_files)
                 work_items = [item for item in work_items if item.file_path in selected]
+            work_items = self._apply_work_item_limit(work_items, max_files)
             step["summary"] = f"Coverage records: {len(coverage_records)}, work items: {len(work_items)}"
             step["exit_code"] = getattr(coverage_result, "exit_code", None)
+            step["maven_log_paths"] = maven_log_paths
+            step["baseline_coverage_percent"] = baseline_summary.coverage_percent
         if runtime.enabled:
             self._run_daddy_react(repo_context, workspace, logger, runtime, work_items)
         self._save_checkpoint(
@@ -332,6 +366,10 @@ class DaddySubagentsReflectiveWorkflow:
             completed_results=[],
             pending_integrations=[],
             paused=False,
+            extra_metadata={
+                "baseline_coverage": baseline_summary.to_json(),
+                "all_work_items": [item.to_json() for item in work_items],
+            },
         )
         if self._pause_requested(workspace):
             self._save_checkpoint(
@@ -354,6 +392,7 @@ class DaddySubagentsReflectiveWorkflow:
                 overview_path=str(workspace.artifacts_dir / "overview.md"),
                 workbook_path=str(workbook_path),
                 summary_path=str(summary_path),
+                coverage_comparison_path=None,
             )
         subagent_results = self._dispatch_subagents(
             repo_context,
@@ -374,9 +413,43 @@ class DaddySubagentsReflectiveWorkflow:
             completed_results=subagent_results,
             pending_integrations=pending_integrations,
             paused=False,
+            extra_metadata={
+                "baseline_coverage": baseline_summary.to_json(),
+                "all_work_items": [item.to_json() for item in work_items],
+            },
         )
-        workbook_path = report_writer.write_workbook(repo_context, work_items, attempts, [])
-        summary_path = report_writer.write_json_summary(repo_context, work_items, subagent_results, [])
+        coverage_comparison = None
+        coverage_comparison_path = None
+        if self.config.auto_integrate_successful_worktrees and any(
+            item.status == "integrated" for item in pending_integrations
+        ):
+            coverage_comparison = self._finalize_after_merge(
+                repo_context=repo_context,
+                workspace=workspace,
+                logger=logger,
+                baseline_summary=baseline_summary,
+            )
+            if coverage_comparison:
+                coverage_comparison_path = str(report_writer.write_coverage_comparison(coverage_comparison))
+                self._persist_coverage_comparison_metadata(
+                    checkpoint_store,
+                    coverage_comparison,
+                    coverage_comparison_path,
+                )
+        workbook_path = report_writer.write_workbook(
+            repo_context,
+            work_items,
+            attempts,
+            [],
+            coverage_comparison=coverage_comparison,
+        )
+        summary_path = report_writer.write_json_summary(
+            repo_context,
+            work_items,
+            subagent_results,
+            [],
+            coverage_comparison=coverage_comparison,
+        )
         tracer.log_metrics(
             {
                 "work_item_count": len(work_items),
@@ -384,10 +457,15 @@ class DaddySubagentsReflectiveWorkflow:
                 "attempt_count": len(attempts),
                 "passed_subagents": sum(1 for item in subagent_results if item.status == "passed"),
                 "pending_integrations": len(pending_integrations),
+                "baseline_coverage_percent": baseline_summary.coverage_percent,
+                "after_merge_coverage_percent": coverage_comparison.after.coverage_percent if coverage_comparison else baseline_summary.coverage_percent,
+                "coverage_percentage_increase": coverage_comparison.percentage_increase if coverage_comparison else 0.0,
             }
         )
         tracer.log_artifact(workbook_path)
         tracer.log_artifact(summary_path)
+        if coverage_comparison_path:
+            tracer.log_artifact(coverage_comparison_path)
         tracer.log_artifact(workspace.logs_dir / "run.log")
         tracer.log_artifact(workspace.logs_dir / "events.jsonl")
         tracer.log_artifact(workspace.logs_dir / "dspy_traces.jsonl")
@@ -400,6 +478,7 @@ class DaddySubagentsReflectiveWorkflow:
             overview_path=str(workspace.artifacts_dir / "overview.md"),
             workbook_path=str(workbook_path),
             summary_path=str(summary_path),
+            coverage_comparison_path=coverage_comparison_path,
         )
 
     def _dispatch_subagents(
@@ -487,7 +566,7 @@ class DaddySubagentsReflectiveWorkflow:
 
         prior_failures: list[str] = []
         for iteration in range(1, self.config.max_subagent_iterations + 1):
-            suggested_test_path = self._suggest_test_path(item.file_path, iteration)
+            suggested_test_path = self._suggest_test_path(worktree_path, item.file_path, iteration)
             objective = self._subagent_objective(item, suggested_test_path, iteration, prior_failures)
             generated_file = ""
             tool_summary = ""
@@ -582,6 +661,7 @@ class DaddySubagentsReflectiveWorkflow:
                 status="pending_review",
                 file_path=item.file_path,
                 reason="Generated tests passed single-test validation",
+                priority_rank=item.priority_rank,
             )
             if self.config.auto_integrate_successful_worktrees:
                 try:
@@ -621,7 +701,7 @@ class DaddySubagentsReflectiveWorkflow:
         name = tail[:-4] if tail.endswith(".git") else tail
         return slugify(name)[:40] or "repo"
 
-    def _suggest_test_path(self, source_file_path: str, iteration: int) -> str:
+    def _suggest_test_path(self, worktree_root: Path, source_file_path: str, iteration: int) -> str:
         source = Path(source_file_path)
         parts = list(source.parts)
         if "main" in parts:
@@ -632,7 +712,7 @@ class DaddySubagentsReflectiveWorkflow:
             parts[-1] = f"{Path(parts[-1]).stem}GeneratedTestIter{iteration}.java"
         else:
             parts.append(f"GeneratedTestIter{iteration}.java")
-        return str(Path(*parts))
+        return str((worktree_root / Path(*parts)).resolve())
 
     def _subagent_objective(
         self,
@@ -650,6 +730,7 @@ class DaddySubagentsReflectiveWorkflow:
             "- Do not modify production code.\n"
             "- Do not modify existing tests.\n"
             "- Use folder/file search and file reads before writing.\n"
+            "- Pass the full absolute file path to write_new_test_file.\n"
             "- Run the single test after writing.\n"
             f"Assigned file: {item.file_path}\n"
             f"Coverage: {item.coverage_percent}% with missed lines {item.missed_line_numbers}\n"
@@ -671,7 +752,9 @@ class DaddySubagentsReflectiveWorkflow:
         completed_results: list[SubagentResult],
         pending_integrations: list[IntegrationDecision],
         paused: bool,
+        extra_metadata: dict[str, Any] | None = None,
     ) -> None:
+        existing = store.load()
         checkpoint = RunCheckpoint(
             run_id=repo_context.run_id,
             phase=phase,
@@ -684,9 +767,11 @@ class DaddySubagentsReflectiveWorkflow:
             completed_results=completed_results,
             pending_integrations=pending_integrations,
             metadata={
+                **(existing.metadata if existing else {}),
                 "clone_path": str(repo_context.clone_path),
                 "source_type": repo_context.source_type,
                 "module_paths": repo_context.module_paths,
+                **(extra_metadata or {}),
             },
         )
         store.save(checkpoint)
@@ -695,13 +780,148 @@ class DaddySubagentsReflectiveWorkflow:
         current = self._read_pending_integrations(workspace)
         current = [item for item in current if item.commit_hash != decision.commit_hash]
         current.append(decision)
-        write_json(workspace.integrations_path, [item.to_json() for item in current])
+        write_json(workspace.integrations_path, [item.to_json() for item in self._sort_integrations(current)])
 
     def _read_pending_integrations(self, workspace: RunWorkspace) -> list[IntegrationDecision]:
         from agentic_testgen.utils import read_json
 
         payload = read_json(workspace.integrations_path, default=[])
-        return [IntegrationDecision(**item) for item in payload]
+        return self._sort_integrations([IntegrationDecision(**item) for item in payload])
+
+    def _apply_work_item_limit(self, work_items: list[FileWorkItem], max_files: int | None) -> list[FileWorkItem]:
+        effective_max = self.config.max_files_per_run if max_files is None else max_files
+        if effective_max is None or effective_max <= 0:
+            return work_items
+        return work_items[:effective_max]
+
+    def _sort_integrations(self, decisions: list[IntegrationDecision]) -> list[IntegrationDecision]:
+        return sorted(decisions, key=lambda item: (item.priority_rank or 0, item.file_path, item.commit_hash))
+
+    def rerun_after_merge_coverage(self, run_id: str) -> CoverageComparison | None:
+        workspace = self.workspace_manager.create(run_id)
+        checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
+        checkpoint = checkpoint_store.load()
+        if not checkpoint:
+            raise ValueError(f"No checkpoint found for {run_id}")
+        baseline_payload = checkpoint.metadata.get("baseline_coverage")
+        if not baseline_payload:
+            return None
+        baseline_summary = GlobalCoverageSummary(**baseline_payload)
+        repo_context = RepoContext(
+            run_id=run_id,
+            repo_url=checkpoint.repo_url,
+            repo_name=checkpoint.repo_name,
+            clone_path=Path(checkpoint.metadata["clone_path"]),
+            workspace_root=workspace.root,
+            source_type=checkpoint.metadata.get("source_type", "gitlab"),
+            module_paths=checkpoint.metadata.get("module_paths", []),
+        )
+        logger = self._build_logger(run_id, workspace)
+        comparison = self._finalize_after_merge(
+            repo_context=repo_context,
+            workspace=workspace,
+            logger=logger,
+            baseline_summary=baseline_summary,
+        )
+        if comparison:
+            comparison_path = workspace.artifacts_dir / "coverage-comparison.md"
+            self._persist_coverage_comparison_metadata(
+                checkpoint_store,
+                comparison,
+                str(comparison_path),
+            )
+            self._refresh_reports_from_checkpoint(
+                checkpoint=checkpoint_store.load() or checkpoint,
+                repo_context=repo_context,
+                workspace=workspace,
+                coverage_comparison=comparison,
+            )
+        return comparison
+
+    def _finalize_after_merge(
+        self,
+        *,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+        baseline_summary: GlobalCoverageSummary,
+    ) -> CoverageComparison | None:
+        report_writer = ReportWriter(workspace.artifacts_dir)
+        with logger.step("coverage.after_merge", details={"repo_root": str(repo_context.clone_path)}) as step:
+            result, records, maven_log_paths = self.coverage.run_tests_with_coverage(
+                repo_context.clone_path,
+                maven_logs_dir=workspace.logs_dir / "maven",
+                log_prefix="after-merge-project-coverage",
+            )
+            after_summary = self.coverage.summarize_global_coverage(records)
+            comparison = self.coverage.compare_global_coverage(baseline_summary, after_summary)
+            comparison_path = report_writer.write_coverage_comparison(comparison)
+            step["summary"] = f"Coverage increased by {comparison.percentage_increase}%"
+            step["exit_code"] = result.exit_code
+            step["maven_log_paths"] = maven_log_paths
+            step["comparison_path"] = str(comparison_path)
+            return comparison
+
+    def _persist_coverage_comparison_metadata(
+        self,
+        checkpoint_store: CheckpointStore,
+        comparison: CoverageComparison,
+        comparison_path: str,
+    ) -> None:
+        checkpoint = checkpoint_store.load()
+        if not checkpoint:
+            return
+        checkpoint.metadata["after_merge_coverage"] = comparison.after.to_json()
+        checkpoint.metadata["coverage_percentage_increase"] = comparison.percentage_increase
+        checkpoint.metadata["coverage_comparison_path"] = comparison_path
+        checkpoint_store.save(checkpoint)
+
+    def _refresh_reports_from_checkpoint(
+        self,
+        *,
+        checkpoint: RunCheckpoint,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        coverage_comparison: CoverageComparison | None = None,
+    ) -> tuple[Path, Path]:
+        report_writer = ReportWriter(workspace.artifacts_dir)
+        work_items = self._work_items_from_checkpoint(checkpoint)
+        results = checkpoint.completed_results
+        attempts = [attempt for result in results for attempt in result.attempts]
+        workbook_path = report_writer.write_workbook(
+            repo_context,
+            work_items,
+            attempts,
+            [],
+            coverage_comparison=coverage_comparison,
+        )
+        summary_path = report_writer.write_json_summary(
+            repo_context,
+            work_items,
+            results,
+            [],
+            coverage_comparison=coverage_comparison,
+        )
+        return workbook_path, summary_path
+
+    def _coverage_comparison_from_metadata(self, metadata: dict[str, Any]) -> CoverageComparison | None:
+        before_payload = metadata.get("baseline_coverage")
+        after_payload = metadata.get("after_merge_coverage")
+        if not before_payload or not after_payload:
+            return None
+        return CoverageComparison(
+            before=GlobalCoverageSummary(**before_payload),
+            after=GlobalCoverageSummary(**after_payload),
+            percentage_increase=float(metadata.get("coverage_percentage_increase", 0.0)),
+            covered_line_increase=after_payload.get("covered_lines", 0) - before_payload.get("covered_lines", 0),
+            missed_line_reduction=before_payload.get("missed_lines", 0) - after_payload.get("missed_lines", 0),
+        )
+
+    def _work_items_from_checkpoint(self, checkpoint: RunCheckpoint) -> list[FileWorkItem]:
+        payload = checkpoint.metadata.get("all_work_items")
+        if payload:
+            return [FileWorkItem(**item) for item in payload]
+        return checkpoint.pending_work_items[:]
 
     def _run_daddy_react(
         self,

@@ -5,8 +5,8 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from agentic_testgen.config import AppConfig
-from agentic_testgen.models import CoverageRecord, FileWorkItem
-from agentic_testgen.utils import run_command
+from agentic_testgen.models import CoverageComparison, CoverageRecord, FileWorkItem, GlobalCoverageSummary
+from agentic_testgen.utils import run_command, write_command_logs
 
 
 class CoverageAnalyzer:
@@ -31,7 +31,13 @@ class CoverageAnalyzer:
                 return "testng"
         return "unknown"
 
-    def run_tests_with_coverage(self, repo_root: Path) -> tuple[object, list[CoverageRecord]]:
+    def run_tests_with_coverage(
+        self,
+        repo_root: Path,
+        *,
+        maven_logs_dir: Path | None = None,
+        log_prefix: str = "project-coverage",
+    ) -> tuple[object, list[CoverageRecord], dict[str, str]]:
         env: dict[str, str] = {}
         if self.config.java_home:
             env["JAVA_HOME"] = self.config.java_home
@@ -47,7 +53,8 @@ class CoverageAnalyzer:
             cwd=repo_root,
             env=env,
         )
-        return result, self.collect_reports(repo_root)
+        log_paths = write_command_logs(maven_logs_dir, log_prefix, result) if maven_logs_dir else {}
+        return result, self.collect_reports(repo_root), log_paths
 
     def collect_reports(self, repo_root: Path) -> list[CoverageRecord]:
         records: list[CoverageRecord] = []
@@ -131,6 +138,31 @@ class CoverageAnalyzer:
                 )
             )
         return items
+
+    def summarize_global_coverage(self, coverage_records: list[CoverageRecord]) -> GlobalCoverageSummary:
+        covered = sum(item.covered_lines for item in coverage_records)
+        missed = sum(item.missed_lines for item in coverage_records)
+        total = covered + missed
+        percent = round((covered / total) * 100, 2) if total else 100.0
+        return GlobalCoverageSummary(
+            covered_lines=covered,
+            missed_lines=missed,
+            coverage_percent=percent,
+            report_count=len(coverage_records),
+        )
+
+    def compare_global_coverage(
+        self,
+        before: GlobalCoverageSummary,
+        after: GlobalCoverageSummary,
+    ) -> CoverageComparison:
+        return CoverageComparison(
+            before=before,
+            after=after,
+            percentage_increase=round(after.coverage_percent - before.coverage_percent, 2),
+            covered_line_increase=after.covered_lines - before.covered_lines,
+            missed_line_reduction=before.missed_lines - after.missed_lines,
+        )
 
 
 def summarize_tree(root: Path, max_depth: int = 4) -> str:
