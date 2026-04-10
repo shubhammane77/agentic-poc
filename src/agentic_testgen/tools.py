@@ -4,7 +4,10 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-import dspy
+try:
+    import dspy
+except ImportError:  # pragma: no cover - optional runtime dependency
+    dspy = None  # type: ignore[assignment]
 
 from agentic_testgen.config import AppConfig
 from agentic_testgen.coverage import CoverageAnalyzer
@@ -48,15 +51,11 @@ class SafeToolset:
         path = Path(path_value)
         resolved = path if path.is_absolute() else (self.active_root / path)
         resolved = resolved.resolve()
-        if not str(resolved).startswith(str(self.active_root_resolved)):
+        try:
+            resolved.relative_to(self.active_root_resolved)
+        except ValueError:
             raise ValueError(f"Path outside allowed root: {path_value}")
         return resolved
-
-    def _test_root(self) -> Path:
-        for candidate in self.active_root.rglob("src/test/java"):
-            if candidate.is_dir():
-                return candidate
-        return self.active_root / "src" / "test" / "java"
 
     def _is_within_test_tree(self, target: Path) -> bool:
         try:
@@ -280,6 +279,8 @@ class SafeToolset:
             shutil.rmtree(self.context.active_worktree, ignore_errors=True)
 
     def build_dspy_tools(self) -> list[dspy.Tool]:
+        if dspy is None:
+            raise RuntimeError("DSPy is not installed.")
         return [
             dspy.Tool(self.read_file),
             dspy.Tool(self.write_new_test_file),
@@ -291,6 +292,8 @@ class SafeToolset:
         ]
 
     def build_repo_dspy_tools(self) -> list[dspy.Tool]:
+        if dspy is None:
+            raise RuntimeError("DSPy is not installed.")
         return [
             dspy.Tool(self.read_file),
             dspy.Tool(self.read_folder_structure),

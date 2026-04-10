@@ -35,10 +35,6 @@ class CoverageAnalyzer:
                 return framework, version
         return "unknown", ""
 
-    def detect_test_framework(self, repo_root: Path) -> str:
-        framework, _version = self.detect_test_framework_info(repo_root)
-        return framework
-
     def run_tests_with_coverage(
         self,
         repo_root: Path,
@@ -78,7 +74,8 @@ class CoverageAnalyzer:
             return []
         root = ET.fromstring(report_path.read_text(encoding="utf-8"))
         records: list[CoverageRecord] = []
-        module_name = str(report_path.parent.parent.parent.relative_to(repo_root))
+        module_root = report_path.parents[3]
+        module_name = str(module_root.relative_to(repo_root))
         for package in root.findall(".//package"):
             package_name = package.attrib.get("name", "")
             for source in package.findall("sourcefile"):
@@ -95,11 +92,11 @@ class CoverageAnalyzer:
                         missed_line_numbers.append(int(line.attrib.get("nr", "0")))
                 total = covered + missed
                 coverage = round((covered / total) * 100, 2) if total else 100.0
-                resolved = self._resolve_source_path(repo_root, package_name, source.attrib["name"])
+                resolved = self._resolve_source_path(repo_root, module_root, package_name, source.attrib["name"])
                 records.append(
                     CoverageRecord(
                         file_path=resolved,
-                        module=module_name if module_name != "target" else ".",
+                        module=module_name,
                         covered_lines=covered,
                         missed_lines=missed,
                         coverage_percent=coverage,
@@ -109,17 +106,21 @@ class CoverageAnalyzer:
                 )
         return records
 
-    def _resolve_source_path(self, repo_root: Path, package_name: str, file_name: str) -> str:
+    def _resolve_source_path(self, repo_root: Path, module_root: Path, package_name: str, file_name: str) -> str:
         package_path = Path(*[part for part in package_name.split("/") if part])
-        direct_candidates = list(repo_root.rglob(str(Path("src/main/java") / package_path / file_name)))
+        direct_candidates = list(module_root.rglob(str(Path("src/main/java") / package_path / file_name)))
         if direct_candidates:
-            shortest = min(direct_candidates, key=lambda item: len(item.parts))
-            return str(shortest.relative_to(repo_root))
-        fallback_candidates = [path for path in repo_root.rglob(file_name) if "src" in path.parts and "main" in path.parts]
+            candidate = direct_candidates[0]
+            return str(candidate.relative_to(repo_root))
+        fallback_candidates = [
+            path
+            for path in module_root.rglob(file_name)
+            if "src" in path.parts and "main" in path.parts
+        ]
         if fallback_candidates:
-            shortest = min(fallback_candidates, key=lambda item: len(item.parts))
-            return str(shortest.relative_to(repo_root))
-        guessed = Path("src/main/java") / package_path / file_name
+            candidate = fallback_candidates[0]
+            return str(candidate.relative_to(repo_root))
+        guessed = module_root / "src" / "main" / "java" / package_path / file_name
         return str(guessed)
 
     def build_work_items(self, coverage_records: list[CoverageRecord]) -> list[FileWorkItem]:

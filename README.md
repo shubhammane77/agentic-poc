@@ -45,6 +45,7 @@ cp .env.example .env
 - optional `MVN_BIN`
 - optional `MAVEN_SETTINGS_XML`
 - optional `MAX_FILES_PER_RUN`
+- optional `REPO_URL` (used when `--repo-url` is omitted)
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`
@@ -82,6 +83,12 @@ You can also use the generated script entrypoint:
 
 ```bash
 uv run testgen run --repo-url https://gitlab.example.com/group/project.git
+```
+
+Or run without `--repo-url` if `REPO_URL` is set in `.env`:
+
+```bash
+uv run testgen run
 ```
 
 The command prints:

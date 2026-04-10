@@ -5,7 +5,10 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
-import dspy
+try:
+    import dspy
+except ImportError:  # pragma: no cover - optional runtime dependency
+    dspy = None  # type: ignore[assignment]
 
 from agentic_testgen.checkpointing import CheckpointStore
 from agentic_testgen.config import AppConfig
@@ -45,6 +48,9 @@ class DSPyRuntime:
         self._configure()
 
     def _configure(self) -> None:
+        if dspy is None:
+            self.logger.log_event("dspy.configure", "skipped", summary="DSPy not installed")
+            return
         model_name = self.model_override.model_name if self.model_override else self.config.model.model_name
         if not model_name:
             self.logger.log_event("dspy.configure", "skipped", summary="No model configured")

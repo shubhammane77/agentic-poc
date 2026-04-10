@@ -24,11 +24,18 @@ def main() -> None:
 
 
 @app.command()
-def run(repo_url: str, run_id: str | None = None, max_files: int | None = None) -> None:
+def run(
+    repo_url: str | None = typer.Option(None, "--repo-url"),
+    run_id: str | None = None,
+    max_files: int | None = None,
+) -> None:
     """Run the daddy_subagents_reflective workflow against a GitLab repo."""
     config = _config()
+    effective_repo_url = repo_url or config.repo_url
+    if not effective_repo_url:
+        raise typer.BadParameter("Provide --repo-url or set REPO_URL in .env")
     workflow = DaddySubagentsReflectiveWorkflow(config)
-    result = workflow.run_from_gitlab(repo_url, run_id=run_id, max_files=max_files)
+    result = workflow.run_from_gitlab(effective_repo_url, run_id=run_id, max_files=max_files)
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"overview={result.overview_path}")
     typer.echo(f"workbook={result.workbook_path}")
@@ -124,6 +131,7 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
                 if completed.commit_hash == decision.commit_hash:
                     completed.integration_status = "integrated"
         else:
+            run_command(["git", "cherry-pick", "--abort"], cwd=clone_path)
             decision.status = "integration_failed"
             decision.reason = result.stderr or result.stdout
             remaining.append(decision)
