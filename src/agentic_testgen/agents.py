@@ -1,0 +1,701 @@
+from __future__ import annotations
+
+import copy
+import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any
+
+import dspy
+
+from agentic_testgen.checkpointing import CheckpointStore
+from agentic_testgen.config import AppConfig
+from agentic_testgen.coverage import CoverageAnalyzer, summarize_tree
+from agentic_testgen.gitlab import GitLabRepositoryManager
+from agentic_testgen.logging import RunLogger
+from agentic_testgen.models import (
+    AttemptRecord,
+    FileWorkItem,
+    IntegrationDecision,
+    ModelDefinition,
+    RepoContext,
+    RunCheckpoint,
+    SubagentResult,
+    WorkflowRunResult,
+)
+from agentic_testgen.reporting import ReportWriter
+from agentic_testgen.tools import SafeToolset, ToolContext
+from agentic_testgen.tracing import MlflowTracer
+from agentic_testgen.utils import new_run_id, prompt_hash, utc_timestamp, write_json
+from agentic_testgen.workspace import RunWorkspace, WorkspaceManager
+
+
+PROMPT_VERSION = "daddy_subagents_reflective_v1"
+
+
+class DSPyRuntime:
+    def __init__(self, config: AppConfig, logger: RunLogger, model_override: ModelDefinition | None = None):
+        self.config = config
+        self.logger = logger
+        self.model_override = model_override
+        self.enabled = False
+        self.model_id = "unconfigured"
+        self._configure()
+
+    def _configure(self) -> None:
+        model_name = self.model_override.model_name if self.model_override else self.config.model.model_name
+        if not model_name:
+            self.logger.log_event("dspy.configure", "skipped", summary="No model configured")
+            return
+        api_key = ""
+        api_base = ""
+        if self.model_override:
+            import os
+
+            api_key = os.getenv(self.model_override.api_key_env, "")
+            api_base = self.model_override.api_base or ""
+            self.model_id = self.model_override.model_id
+        else:
+            api_key = self.config.model.api_key
+            api_base = self.config.model.api_base
+            self.model_id = model_name
+
+        final_model = model_name
+        if "/" not in final_model and self.config.model.provider:
+            final_model = f"{self.config.model.provider}/{final_model}"
+        try:
+            kwargs: dict[str, Any] = {}
+            if api_key:
+                kwargs["api_key"] = api_key
+            if api_base:
+                kwargs["api_base"] = api_base
+            lm = dspy.LM(final_model, **kwargs)
+            dspy.configure(lm=lm)
+            self.enabled = True
+            self.logger.log_event("dspy.configure", "completed", summary=f"Configured {self.model_id}")
+        except Exception as exc:
+            self.logger.log_event("dspy.configure", "failed", summary=str(exc))
+
+    def overview(self, repo_tree: str, module_paths: list[str], test_framework: str) -> str:
+        if not self.enabled:
+            return (
+                "# Repository Overview\n\n"
+                f"- Test framework: {test_framework}\n"
+                f"- Modules: {', '.join(module_paths) if module_paths else '(none detected)'}\n\n"
+                "## Tree\n\n```text\n"
+                f"{repo_tree}\n```"
+            )
+        try:
+            program = dspy.ChainOfThought("repo_tree, module_paths, test_framework -> overview_markdown")
+            result = program(
+                repo_tree=repo_tree,
+                module_paths=", ".join(module_paths),
+                test_framework=test_framework,
+            )
+            return getattr(result, "overview_markdown", str(result))
+        except Exception as exc:
+            self.logger.log_event("dspy.overview", "failed", summary=str(exc))
+            return (
+                "# Repository Overview\n\n"
+                f"- Test framework: {test_framework}\n"
+                f"- Modules: {', '.join(module_paths) if module_paths else '(none detected)'}\n"
+            )
+
+    def reflect(self, objective: str, latest_output: str, prior_failures: str) -> str:
+        if not self.enabled:
+            return latest_output or prior_failures or "No reflection available."
+        try:
+            program = dspy.Predict("objective, latest_output, prior_failures -> summary")
+            result = program(
+                objective=objective,
+                latest_output=latest_output[:8000],
+                prior_failures=prior_failures[:8000],
+            )
+            return getattr(result, "summary", str(result))
+        except Exception as exc:
+            self.logger.log_event("dspy.reflect", "failed", summary=str(exc))
+            return latest_output or prior_failures or str(exc)
+
+
+class DaddySubagentsReflectiveWorkflow:
+    def __init__(self, config: AppConfig):
+        self.config = config
+        self.workspace_manager = WorkspaceManager(config.workspace_root)
+        self.coverage = CoverageAnalyzer(config)
+
+    def run_from_gitlab(self, repo_url: str, run_id: str | None = None) -> WorkflowRunResult:
+        self.config.validate_for_run()
+        run_id = run_id or new_run_id()
+        workspace = self.workspace_manager.create(run_id)
+        repo_name = self._repo_name(repo_url)
+        clone_target = workspace.clone_dir / repo_name
+        logger = self._build_logger(run_id, workspace)
+        tracer = MlflowTracer(self.config.mlflow, logger)
+        tracer.validate()
+        tracer.configure()
+        with logger.step("gitlab.clone", details={"repo": repo_url}) as step:
+            manager = GitLabRepositoryManager(self.config, logger)
+            result = manager.clone(repo_url, clone_target)
+            if not result.ok:
+                raise RuntimeError(result.stderr or result.stdout)
+            step["summary"] = f"Cloned {repo_name}"
+        return self._execute(
+            run_id=run_id,
+            repo_url=repo_url,
+            source_type="gitlab",
+            repo_name=repo_name,
+            repo_root=clone_target,
+            workspace=workspace,
+            logger=logger,
+            model_override=None,
+        )
+
+    def run_from_local_path(
+        self,
+        repo_path: Path,
+        *,
+        run_id: str | None = None,
+        source_name: str | None = None,
+        selected_files: list[str] | None = None,
+        model_override: ModelDefinition | None = None,
+    ) -> WorkflowRunResult:
+        run_id = run_id or new_run_id("eval")
+        workspace = self.workspace_manager.create(run_id)
+        repo_name = source_name or repo_path.name
+        clone_target = workspace.clone_dir / repo_name
+        logger = self._build_logger(run_id, workspace)
+        tracer = MlflowTracer(self.config.mlflow, logger)
+        tracer.validate()
+        tracer.configure()
+        with logger.step("fixture.copy", details={"source": str(repo_path)}) as step:
+            self.workspace_manager.copy_local_repo(repo_path, clone_target)
+            self._ensure_git_repository(clone_target, logger)
+            step["summary"] = f"Prepared fixture {repo_name}"
+        return self._execute(
+            run_id=run_id,
+            repo_url=str(repo_path),
+            source_type="fixture",
+            repo_name=repo_name,
+            repo_root=clone_target,
+            workspace=workspace,
+            logger=logger,
+            model_override=model_override,
+            selected_files=selected_files,
+        )
+
+    def resume(self, run_id: str) -> WorkflowRunResult:
+        workspace = self.workspace_manager.create(run_id)
+        logger = self._build_logger(run_id, workspace)
+        checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
+        checkpoint = checkpoint_store.load()
+        if not checkpoint:
+            raise ValueError(f"No checkpoint found for {run_id}")
+        clone_path = Path(checkpoint.metadata["clone_path"])
+        runtime = DSPyRuntime(self.config, logger)
+        tracer = MlflowTracer(self.config.mlflow, logger)
+        tracer.validate()
+        tracer.configure()
+        repo_context = RepoContext(
+            run_id=run_id,
+            repo_url=checkpoint.repo_url,
+            repo_name=checkpoint.repo_name,
+            clone_path=clone_path,
+            workspace_root=workspace.root,
+            source_type=checkpoint.metadata.get("source_type", "gitlab"),
+            module_paths=checkpoint.metadata.get("module_paths", []),
+        )
+        report_writer = ReportWriter(workspace.artifacts_dir)
+        results = checkpoint.completed_results[:]
+        work_items = checkpoint.pending_work_items[:]
+        attempts = [attempt for result in results for attempt in result.attempts]
+        new_results = self._dispatch_subagents(repo_context, workspace, logger, runtime, work_items, results, checkpoint_store)
+        results.extend(new_results)
+        attempts.extend(attempt for result in new_results for attempt in result.attempts)
+        pending = self._read_pending_integrations(workspace)
+        self._save_checkpoint(
+            checkpoint_store,
+            repo_context,
+            phase="resumed_completed",
+            pending_work_items=[],
+            completed_results=results,
+            pending_integrations=pending,
+            paused=False,
+        )
+        overview_path = workspace.artifacts_dir / "overview.md"
+        workbook_path = report_writer.write_workbook(repo_context, [], attempts, [])
+        summary_path = report_writer.write_json_summary(repo_context, [], results, [])
+        return WorkflowRunResult(
+            run_id=run_id,
+            repo_context=repo_context,
+            work_items=[],
+            subagent_results=results,
+            attempts=attempts,
+            overview_path=str(overview_path),
+            workbook_path=str(workbook_path),
+            summary_path=str(summary_path),
+        )
+
+    def _execute(
+        self,
+        *,
+        run_id: str,
+        repo_url: str,
+        source_type: str,
+        repo_name: str,
+        repo_root: Path,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+        model_override: ModelDefinition | None,
+        selected_files: list[str] | None = None,
+    ) -> WorkflowRunResult:
+        checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
+        runtime = DSPyRuntime(self.config, logger, model_override=model_override)
+        report_writer = ReportWriter(workspace.artifacts_dir)
+        repo_context = RepoContext(
+            run_id=run_id,
+            repo_url=repo_url,
+            repo_name=repo_name,
+            clone_path=repo_root,
+            workspace_root=workspace.root,
+            source_type=source_type,
+        )
+        self._ensure_git_repository(repo_root, logger)
+        repo_tree = summarize_tree(repo_root)
+        modules = self.coverage.discover_modules(repo_root)
+        repo_context.module_paths = modules
+        test_framework = self.coverage.detect_test_framework(repo_root)
+        with logger.step("repo.analyze", details={"modules": modules}) as step:
+            overview = runtime.overview(repo_tree, modules, test_framework)
+            overview_path = report_writer.write_overview(overview)
+            step["summary"] = f"Overview written to {overview_path.name}"
+        self._save_checkpoint(
+            checkpoint_store,
+            repo_context,
+            phase="analysis_completed",
+            pending_work_items=[],
+            completed_results=[],
+            pending_integrations=[],
+            paused=False,
+        )
+        with logger.step("coverage.run") as step:
+            coverage_result, coverage_records = self.coverage.run_tests_with_coverage(repo_root)
+            work_items = self.coverage.build_work_items(coverage_records)
+            if selected_files:
+                selected = set(selected_files)
+                work_items = [item for item in work_items if item.file_path in selected]
+            step["summary"] = f"Coverage records: {len(coverage_records)}, work items: {len(work_items)}"
+            step["exit_code"] = getattr(coverage_result, "exit_code", None)
+        if runtime.enabled:
+            self._run_daddy_react(repo_context, workspace, logger, runtime, work_items)
+        self._save_checkpoint(
+            checkpoint_store,
+            repo_context,
+            phase="coverage_completed",
+            pending_work_items=work_items,
+            completed_results=[],
+            pending_integrations=[],
+            paused=False,
+        )
+        if self._pause_requested(workspace):
+            self._save_checkpoint(
+                checkpoint_store,
+                repo_context,
+                phase="paused",
+                pending_work_items=work_items,
+                completed_results=[],
+                pending_integrations=[],
+                paused=True,
+            )
+            workbook_path = report_writer.write_workbook(repo_context, work_items, [], [])
+            summary_path = report_writer.write_json_summary(repo_context, work_items, [], [])
+            return WorkflowRunResult(
+                run_id=run_id,
+                repo_context=repo_context,
+                work_items=work_items,
+                subagent_results=[],
+                attempts=[],
+                overview_path=str(workspace.artifacts_dir / "overview.md"),
+                workbook_path=str(workbook_path),
+                summary_path=str(summary_path),
+            )
+        subagent_results = self._dispatch_subagents(
+            repo_context,
+            workspace,
+            logger,
+            runtime,
+            work_items,
+            [],
+            checkpoint_store,
+        )
+        attempts = [attempt for result in subagent_results for attempt in result.attempts]
+        pending_integrations = self._read_pending_integrations(workspace)
+        self._save_checkpoint(
+            checkpoint_store,
+            repo_context,
+            phase="completed",
+            pending_work_items=[],
+            completed_results=subagent_results,
+            pending_integrations=pending_integrations,
+            paused=False,
+        )
+        workbook_path = report_writer.write_workbook(repo_context, work_items, attempts, [])
+        summary_path = report_writer.write_json_summary(repo_context, work_items, subagent_results, [])
+        return WorkflowRunResult(
+            run_id=run_id,
+            repo_context=repo_context,
+            work_items=work_items,
+            subagent_results=subagent_results,
+            attempts=attempts,
+            overview_path=str(workspace.artifacts_dir / "overview.md"),
+            workbook_path=str(workbook_path),
+            summary_path=str(summary_path),
+        )
+
+    def _dispatch_subagents(
+        self,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+        runtime: DSPyRuntime,
+        work_items: list[FileWorkItem],
+        existing_results: list[SubagentResult],
+        checkpoint_store: CheckpointStore,
+    ) -> list[SubagentResult]:
+        results: list[SubagentResult] = []
+        with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel_subagents)) as pool:
+            futures = []
+            for item in work_items:
+                if self._pause_requested(workspace):
+                    break
+                item.assigned_subagent_id = item.assigned_subagent_id or f"subagent_{item.priority_rank:03d}"
+                futures.append(
+                    pool.submit(self._run_subagent, repo_context, workspace, logger, runtime, item, checkpoint_store)
+                )
+            for future in as_completed(futures):
+                result = future.result()
+                results.append(result)
+                pending_items = [item for item in work_items if item.file_path not in {r.file_path for r in results}]
+                self._save_checkpoint(
+                    checkpoint_store,
+                    repo_context,
+                    phase="subagents_running",
+                    pending_work_items=pending_items,
+                    completed_results=existing_results + results,
+                    pending_integrations=self._read_pending_integrations(workspace),
+                    paused=self._pause_requested(workspace),
+                )
+        return sorted(results, key=lambda item: item.subagent_id)
+
+    def _run_subagent(
+        self,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+        runtime: DSPyRuntime,
+        item: FileWorkItem,
+        checkpoint_store: CheckpointStore,
+    ) -> SubagentResult:
+        subagent_id = item.assigned_subagent_id or new_run_id("subagent")
+        branch_name = f"subagent/{subagent_id}"
+        worktree_path = workspace.worktrees_dir / subagent_id
+        tool_context = ToolContext(
+            run_id=repo_context.run_id,
+            repo_root=repo_context.clone_path,
+            clone_root=repo_context.clone_path,
+            worktrees_root=workspace.worktrees_dir,
+            config=self.config,
+            logger=logger,
+            subagent_id=subagent_id,
+        )
+        toolset = SafeToolset(tool_context)
+        attempts: list[AttemptRecord] = []
+        final_summary = ""
+        commit_hash = ""
+        integration_status = "pending_review"
+        coverage_after: float | None = None
+        coverage_delta = 0.0
+        missed_line_reduction = 0
+        with logger.step("subagent.prepare", subagent_id=subagent_id, file_path=item.file_path) as step:
+            toolset.create_worktree(subagent_id, branch_name)
+            tool_context.active_worktree = worktree_path
+            step["summary"] = f"Worktree {worktree_path.name}"
+        if not runtime.enabled:
+            final_summary = "No DSPy model configured. Subagent cannot generate tests."
+            result = SubagentResult(
+                subagent_id=subagent_id,
+                file_path=item.file_path,
+                status="failed",
+                worktree_path=worktree_path,
+                branch_name=branch_name,
+                attempts=attempts,
+                final_summary=final_summary,
+                integration_status="skipped",
+                error_message=final_summary,
+            )
+            return result
+
+        prior_failures: list[str] = []
+        for iteration in range(1, self.config.max_subagent_iterations + 1):
+            suggested_test_path = self._suggest_test_path(item.file_path, iteration)
+            objective = self._subagent_objective(item, suggested_test_path, iteration, prior_failures)
+            generated_file = ""
+            tool_summary = ""
+            validation_output = ""
+            status = "failed"
+            with logger.step(
+                "subagent.iteration",
+                subagent_id=subagent_id,
+                file_path=item.file_path,
+                iteration=iteration,
+                details={"suggested_test_path": suggested_test_path},
+            ) as step:
+                react = dspy.ReAct(
+                    "objective, file_path, suggested_test_path -> answer",
+                    tools=toolset.build_dspy_tools(),
+                    max_iters=6,
+                )
+                prediction = react(
+                    objective=objective,
+                    file_path=item.file_path,
+                    suggested_test_path=suggested_test_path,
+                )
+                trajectory = getattr(prediction, "trajectory", {})
+                logger.log_trace(
+                    {
+                        "run_id": repo_context.run_id,
+                        "subagent_id": subagent_id,
+                        "iteration": iteration,
+                        "file_path": item.file_path,
+                        "objective": objective,
+                        "trajectory": trajectory,
+                        "answer": getattr(prediction, "answer", str(prediction)),
+                    }
+                )
+                if tool_context.written_files:
+                    generated_file = tool_context.written_files[-1]
+                    validation_output = toolset.run_single_test(generated_file)
+                    status = "passed" if tool_context.last_single_test_exit_code == 0 else "failed"
+                else:
+                    validation_output = "No test file was generated."
+                tool_summary = json.dumps(trajectory, default=str)[:4000]
+                reflective_summary = runtime.reflect(objective, validation_output, "\n".join(prior_failures))
+                attempt = AttemptRecord(
+                    run_id=repo_context.run_id,
+                    subagent_id=subagent_id,
+                    file_path=item.file_path,
+                    iteration=iteration,
+                    prompt_version=PROMPT_VERSION,
+                    prompt_hash=prompt_hash(objective),
+                    tool_call_summary=tool_summary,
+                    generated_test_file=generated_file or None,
+                    single_test_command=f"{self.config.maven_executable()} -q -Dtest={Path(generated_file).stem if generated_file else '<none>'} test",
+                    status=status,
+                    failure_summary="" if status == "passed" else validation_output[:4000],
+                    reflective_summary=reflective_summary[:4000],
+                )
+                attempts.append(attempt)
+                item.status = status
+                step["summary"] = f"Iteration {iteration} {status}"
+                write_json(
+                    workspace.checkpoints_dir / f"{subagent_id}_iter_{iteration}.json",
+                    {"attempt": attempt.to_json(), "file_path": item.file_path},
+                )
+                if status == "passed":
+                    toolset.run_project_tests_with_coverage()
+                    refreshed = self.coverage.collect_reports(worktree_path)
+                    for record in refreshed:
+                        if record.file_path == item.file_path:
+                            coverage_after = record.coverage_percent
+                            coverage_delta = round(record.coverage_percent - item.coverage_percent, 2)
+                            missed_line_reduction = max(0, item.missed_lines - record.missed_lines)
+                            break
+                    commit_hash = toolset.commit_worktree_change(
+                        f"Add generated tests for {Path(item.file_path).name}"
+                    )
+                    final_summary = reflective_summary
+                    break
+                prior_failures.append(reflective_summary)
+                if self._pause_requested(workspace):
+                    break
+        if commit_hash:
+            decision = IntegrationDecision(
+                subagent_id=subagent_id,
+                branch_name=branch_name,
+                commit_hash=commit_hash,
+                status="pending_review",
+                file_path=item.file_path,
+                reason="Generated tests passed single-test validation",
+            )
+            if self.config.auto_integrate_successful_worktrees:
+                try:
+                    toolset.integrate_worktree_result(commit_hash)
+                    decision.status = "integrated"
+                    integration_status = "integrated"
+                except Exception as exc:
+                    decision.status = "integration_failed"
+                    decision.reason = str(exc)
+                    integration_status = "integration_failed"
+            self._append_integration(workspace, decision)
+        if not final_summary:
+            latest_output = attempts[-1].failure_summary if attempts else "No attempts executed."
+            final_summary = runtime.reflect("final summary", latest_output, "\n".join(prior_failures))
+        return SubagentResult(
+            subagent_id=subagent_id,
+            file_path=item.file_path,
+            status="passed" if commit_hash else "failed",
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            commit_hash=commit_hash or None,
+            generated_test_files=[attempt.generated_test_file for attempt in attempts if attempt.generated_test_file],
+            attempts=attempts,
+            final_summary=final_summary,
+            integration_status=integration_status,
+            error_message="" if commit_hash else (attempts[-1].failure_summary if attempts else "No attempts executed."),
+            coverage_after=coverage_after,
+            coverage_delta=coverage_delta,
+            missed_line_reduction=missed_line_reduction,
+        )
+
+    def _build_logger(self, run_id: str, workspace: RunWorkspace) -> RunLogger:
+        return RunLogger(run_id, workspace.logs_dir, secrets=[self.config.gitlab_token, self.config.model.api_key])
+
+    def _repo_name(self, repo_url: str) -> str:
+        tail = repo_url.rstrip("/").split("/")[-1]
+        return tail[:-4] if tail.endswith(".git") else tail
+
+    def _suggest_test_path(self, source_file_path: str, iteration: int) -> str:
+        source = Path(source_file_path)
+        parts = list(source.parts)
+        if "main" in parts:
+            parts[parts.index("main")] = "test"
+        elif "src" in parts:
+            parts = ["src", "test", "java", *parts[1:]]
+        if parts and parts[-1].endswith(".java"):
+            parts[-1] = f"{Path(parts[-1]).stem}GeneratedTestIter{iteration}.java"
+        else:
+            parts.append(f"GeneratedTestIter{iteration}.java")
+        return str(Path(*parts))
+
+    def _subagent_objective(
+        self,
+        item: FileWorkItem,
+        suggested_test_path: str,
+        iteration: int,
+        prior_failures: list[str],
+    ) -> str:
+        failure_text = "\n".join(f"- {failure}" for failure in prior_failures[-3:])
+        return (
+            "You are a Java unit-test generation subagent working inside a Git worktree.\n"
+            "Write meaningful tests only for the assigned source file.\n"
+            "Rules:\n"
+            "- Create only a new test file.\n"
+            "- Do not modify production code.\n"
+            "- Do not modify existing tests.\n"
+            "- Use folder/file search and file reads before writing.\n"
+            "- Run the single test after writing.\n"
+            f"Assigned file: {item.file_path}\n"
+            f"Coverage: {item.coverage_percent}% with missed lines {item.missed_line_numbers}\n"
+            f"Suggested test path: {suggested_test_path}\n"
+            f"Iteration: {iteration}\n"
+            f"Prior failures:\n{failure_text or '- none'}"
+        )
+
+    def _pause_requested(self, workspace: RunWorkspace) -> bool:
+        return (workspace.control_dir / "pause.requested").exists()
+
+    def _save_checkpoint(
+        self,
+        store: CheckpointStore,
+        repo_context: RepoContext,
+        *,
+        phase: str,
+        pending_work_items: list[FileWorkItem],
+        completed_results: list[SubagentResult],
+        pending_integrations: list[IntegrationDecision],
+        paused: bool,
+    ) -> None:
+        checkpoint = RunCheckpoint(
+            run_id=repo_context.run_id,
+            phase=phase,
+            repo_url=repo_context.repo_url,
+            repo_name=repo_context.repo_name,
+            paused=paused,
+            created_at=utc_timestamp(),
+            updated_at=utc_timestamp(),
+            pending_work_items=pending_work_items,
+            completed_results=completed_results,
+            pending_integrations=pending_integrations,
+            metadata={
+                "clone_path": str(repo_context.clone_path),
+                "source_type": repo_context.source_type,
+                "module_paths": repo_context.module_paths,
+            },
+        )
+        store.save(checkpoint)
+
+    def _append_integration(self, workspace: RunWorkspace, decision: IntegrationDecision) -> None:
+        current = self._read_pending_integrations(workspace)
+        current = [item for item in current if item.commit_hash != decision.commit_hash]
+        current.append(decision)
+        write_json(workspace.integrations_path, [item.to_json() for item in current])
+
+    def _read_pending_integrations(self, workspace: RunWorkspace) -> list[IntegrationDecision]:
+        from agentic_testgen.utils import read_json
+
+        payload = read_json(workspace.integrations_path, default=[])
+        return [IntegrationDecision(**item) for item in payload]
+
+    def _run_daddy_react(
+        self,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+        runtime: DSPyRuntime,
+        work_items: list[FileWorkItem],
+    ) -> None:
+        toolset = SafeToolset(
+            ToolContext(
+                run_id=repo_context.run_id,
+                repo_root=repo_context.clone_path,
+                clone_root=repo_context.clone_path,
+                worktrees_root=workspace.worktrees_dir,
+                config=self.config,
+                logger=logger,
+                subagent_id="daddy",
+            )
+        )
+        objective = (
+            "Analyze the repository and confirm the highest-value source files for new test generation.\n"
+            f"Top candidates: {[item.file_path for item in work_items[:5]]}\n"
+            "Use the read/search tools as needed and summarize the best testing opportunities."
+        )
+        try:
+            react = dspy.ReAct("objective -> answer", tools=toolset.build_repo_dspy_tools(), max_iters=4)
+            prediction = react(objective=objective)
+            logger.log_trace(
+                {
+                    "run_id": repo_context.run_id,
+                    "subagent_id": "daddy",
+                    "objective": objective,
+                    "trajectory": getattr(prediction, "trajectory", {}),
+                    "answer": getattr(prediction, "answer", str(prediction)),
+                }
+            )
+        except Exception as exc:
+            logger.log_event("daddy.react", "failed", summary=str(exc))
+
+    def _ensure_git_repository(self, repo_root: Path, logger: RunLogger) -> None:
+        if not (repo_root / ".git").exists():
+            from agentic_testgen.utils import run_command
+
+            run_command(["git", "init"], cwd=repo_root)
+            run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
+            run_command(["git", "config", "user.name", "Agentic Testgen"], cwd=repo_root)
+            run_command(["git", "add", "."], cwd=repo_root)
+            run_command(["git", "commit", "-m", "Initial fixture snapshot"], cwd=repo_root)
+            logger.log_event("git.init", "completed", summary=f"Initialized fixture repo at {repo_root}")
+        else:
+            from agentic_testgen.utils import run_command
+
+            run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
+            run_command(["git", "config", "user.name", "Agentic Testgen"], cwd=repo_root)

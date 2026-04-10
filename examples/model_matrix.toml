@@ -1,0 +1,14 @@
+[[models]]
+model_id = "example-model"
+model_name = "openai/gpt-4o-mini"
+api_key_env = "MODEL_API_KEY"
+
+[[fixtures]]
+name = "simple-service"
+repo_path = "tests/fixtures/repos/simple-service"
+target_files = ["src/main/java/com/example/Calculator.java"]
+
+[[fixtures]]
+name = "multi-module-root"
+repo_path = "tests/fixtures/repos/multi-module-root"
+target_files = ["app/src/main/java/com/example/app/GreetingService.java"]

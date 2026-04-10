@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<report name="app">
+  <package name="com/example/app">
+    <sourcefile name="GreetingService.java">
+      <line nr="3" mi="0" ci="1" mb="0" cb="0"/>
+      <line nr="4" mi="1" ci="0" mb="1" cb="1"/>
+      <line nr="5" mi="1" ci="0" mb="0" cb="0"/>
+      <line nr="7" mi="1" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+  </package>
+</report>

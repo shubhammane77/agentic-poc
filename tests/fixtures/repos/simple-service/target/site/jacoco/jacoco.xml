@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<report name="simple-service">
+  <package name="com/example">
+    <sourcefile name="Calculator.java">
+      <line nr="3" mi="0" ci="1" mb="0" cb="0"/>
+      <line nr="4" mi="0" ci="1" mb="0" cb="0"/>
+      <line nr="7" mi="1" ci="0" mb="0" cb="0"/>
+      <line nr="8" mi="1" ci="0" mb="0" cb="0"/>
+      <line nr="11" mi="1" ci="0" mb="1" cb="1"/>
+      <line nr="12" mi="1" ci="0" mb="0" cb="0"/>
+      <line nr="14" mi="1" ci="0" mb="0" cb="0"/>
+    </sourcefile>
+  </package>
+</report>
