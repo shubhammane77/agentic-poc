@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import asdict
-from pathlib import Path
-
 from pathlib import Path
 
 from agentic_testgen.models import AttemptRecord, FileWorkItem, IntegrationDecision, RunCheckpoint, SubagentResult
@@ -23,7 +20,12 @@ class CheckpointStore:
         if not payload:
             return None
         payload["pending_work_items"] = [FileWorkItem(**item) for item in payload.get("pending_work_items", [])]
-        completed_results = []
+        payload["completed_results"] = self._load_completed_results(payload)
+        payload["pending_integrations"] = [IntegrationDecision(**item) for item in payload.get("pending_integrations", [])]
+        return RunCheckpoint(**payload)
+
+    def _load_completed_results(self, payload: dict) -> list[SubagentResult]:
+        completed_results: list[SubagentResult] = []
         for item in payload.get("completed_results", []):
             completed_results.append(
                 SubagentResult(
@@ -43,6 +45,4 @@ class CheckpointStore:
                     missed_line_reduction=item.get("missed_line_reduction", 0),
                 )
             )
-        payload["completed_results"] = completed_results
-        payload["pending_integrations"] = [IntegrationDecision(**item) for item in payload.get("pending_integrations", [])]
-        return RunCheckpoint(**payload)
+        return completed_results

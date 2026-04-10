@@ -116,13 +116,15 @@ class ReportWriter:
         output = self.artifacts_dir / "results.xlsx"
         sheets = {
             "runs": [
-                ["run_id", "repo_name", "repo_url", "clone_path", "source_type"],
+                ["run_id", "repo_name", "repo_url", "clone_path", "source_type", "test_framework", "test_framework_version"],
                 [
                     repo_context.run_id,
                     repo_context.repo_name,
                     repo_context.repo_url,
                     str(repo_context.clone_path),
                     repo_context.source_type,
+                    repo_context.test_framework,
+                    repo_context.test_framework_version or "unknown",
                 ],
             ],
             "files": [["file_path", "module", "coverage_before", "covered_lines", "missed_lines", "candidate_rank", "assigned_subagent", "status"]],

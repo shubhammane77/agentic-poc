@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from contextlib import contextmanager, nullcontext
-from typing import Any, Iterator
-from urllib.error import URLError
-from urllib.request import urlopen
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
+from urllib.request import urlopen
 
 from agentic_testgen.config import MlflowSettings
 from agentic_testgen.logging import RunLogger

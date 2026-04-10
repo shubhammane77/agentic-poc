@@ -190,3 +190,7 @@ WORKSPACE_ROOT=C:\\agt
 ## Plan
 
 The implementation plan is stored in [docs/agentic-testgen-plan.md](/Users/shubh/Repos/Github_Shubham/agentic-poc/docs/agentic-testgen-plan.md).
+
+## Architecture
+
+The high-level architecture map and visual workflow diagrams are stored in [docs/architecture.md](/Users/shubh/Repos/Github_Shubham/agentic-poc/docs/architecture.md).
