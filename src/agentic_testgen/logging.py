@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -40,7 +41,14 @@ class SecretRedactor:
 
 
 class RunLogger:
-    def __init__(self, run_id: str, logs_dir: Path, secrets: list[str] | None = None):
+    def __init__(
+        self,
+        run_id: str,
+        logs_dir: Path,
+        secrets: list[str] | None = None,
+        *,
+        console_enabled: bool = True,
+    ):
         ensure_dir(logs_dir)
         self.run_id = run_id
         self.logs_dir = logs_dir
@@ -49,6 +57,7 @@ class RunLogger:
         self.trace_path = logs_dir / "dspy_traces.jsonl"
         self.redactor = SecretRedactor(secrets)
         self._lock = Lock()
+        self.console_enabled = console_enabled
 
     def log_event(
         self,
@@ -85,11 +94,23 @@ class RunLogger:
             f"{' subagent=' + subagent_id if subagent_id else ''}"
             f"{' file=' + file_path if file_path else ''}"
             f"{' iter=' + str(iteration) if iteration is not None else ''}"
-            f" :: {event.summary}\n"
+            f" :: {event.summary}"
         )
+        if event.details:
+            try:
+                details_text = json.dumps(event.details, default=str, sort_keys=True)
+            except Exception:
+                details_text = str(event.details)
+            if len(details_text) > 800:
+                details_text = details_text[:800] + "...<truncated>"
+            human += f" | details={details_text}"
+        human += "\n"
         with self._lock:
             with self.run_log_path.open("a", encoding="utf-8") as handle:
                 handle.write(human)
+            if self.console_enabled:
+                sys.stderr.write(human)
+                sys.stderr.flush()
 
     def log_trace(self, payload: dict[str, Any]) -> None:
         redacted = self.redactor.redact(payload)

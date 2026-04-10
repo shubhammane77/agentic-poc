@@ -47,6 +47,7 @@ cp .env.example .env
 - `MODEL_NAME`
 - `MODEL_API_KEY`
 - optional `MODEL_API_BASE`
+- optional `WORKSPACE_ROOT`
 - `MLFLOW_TRACKING_URI`
 - `MLFLOW_EXPERIMENT_NAME`
 - `ENABLE_MLFLOW_TRACING`
@@ -60,6 +61,8 @@ git -c http.sslVerify=false clone <repo-url>
 ```
 
 That means HTTPS certificate verification is disabled for the clone step, which is useful for internal GitLab instances with self-signed certs.
+
+The clone also enables `core.longpaths=true` to reduce Windows path-length issues.
 
 Run the workflow with `uv`:
 
@@ -155,9 +158,24 @@ Copy the values you need into `.env` or export them directly:
 - `MAX_PARALLEL_SUBAGENTS`
 - `MAX_SUBAGENT_ITERATIONS`
 - `AUTO_INTEGRATE_SUCCESSFUL_WORKTREES`
+- `WORKSPACE_ROOT`
 - `MLFLOW_TRACKING_URI=http://127.0.0.1:5000`
 - `MLFLOW_EXPERIMENT_NAME=agentic-testgen`
 - `ENABLE_MLFLOW_TRACING=true`
+
+## Troubleshooting
+
+If Git fails with `filename too long`, use a very short workspace root so the cloned path is shorter:
+
+```bash
+WORKSPACE_ROOT=/tmp/agt
+```
+
+On Windows, prefer something short like:
+
+```bash
+WORKSPACE_ROOT=C:\\agt
+```
 
 ## Plan
 

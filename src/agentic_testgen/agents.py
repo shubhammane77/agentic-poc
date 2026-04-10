@@ -26,7 +26,7 @@ from agentic_testgen.models import (
 from agentic_testgen.reporting import ReportWriter
 from agentic_testgen.tools import SafeToolset, ToolContext
 from agentic_testgen.tracing import MlflowTracer
-from agentic_testgen.utils import new_run_id, prompt_hash, utc_timestamp, write_json
+from agentic_testgen.utils import new_run_id, prompt_hash, slugify, utc_timestamp, write_json
 from agentic_testgen.workspace import RunWorkspace, WorkspaceManager
 
 
@@ -133,22 +133,28 @@ class DaddySubagentsReflectiveWorkflow:
         tracer = MlflowTracer(self.config.mlflow, logger)
         tracer.validate()
         tracer.configure()
-        with logger.step("gitlab.clone", details={"repo": repo_url}) as step:
-            manager = GitLabRepositoryManager(self.config, logger)
-            result = manager.clone(repo_url, clone_target)
-            if not result.ok:
-                raise RuntimeError(result.stderr or result.stdout)
-            step["summary"] = f"Cloned {repo_name}"
-        return self._execute(
-            run_id=run_id,
-            repo_url=repo_url,
-            source_type="gitlab",
-            repo_name=repo_name,
-            repo_root=clone_target,
-            workspace=workspace,
-            logger=logger,
-            model_override=None,
-        )
+        with tracer.run(
+            f"workflow-{run_id}",
+            tags={"workflow": "daddy_subagents_reflective", "source_type": "gitlab", "run_id": run_id},
+        ):
+            tracer.log_params({"repo_url": repo_url, "repo_name": repo_name, "run_id": run_id})
+            with logger.step("gitlab.clone", details={"repo": repo_url}) as step:
+                manager = GitLabRepositoryManager(self.config, logger)
+                result = manager.clone(repo_url, clone_target)
+                if not result.ok:
+                    raise RuntimeError(result.stderr or result.stdout)
+                step["summary"] = f"Cloned {repo_name}"
+            return self._execute(
+                run_id=run_id,
+                repo_url=repo_url,
+                source_type="gitlab",
+                repo_name=repo_name,
+                repo_root=clone_target,
+                workspace=workspace,
+                logger=logger,
+                tracer=tracer,
+                model_override=None,
+            )
 
     def run_from_local_path(
         self,
@@ -167,21 +173,27 @@ class DaddySubagentsReflectiveWorkflow:
         tracer = MlflowTracer(self.config.mlflow, logger)
         tracer.validate()
         tracer.configure()
-        with logger.step("fixture.copy", details={"source": str(repo_path)}) as step:
-            self.workspace_manager.copy_local_repo(repo_path, clone_target)
-            self._ensure_git_repository(clone_target, logger)
-            step["summary"] = f"Prepared fixture {repo_name}"
-        return self._execute(
-            run_id=run_id,
-            repo_url=str(repo_path),
-            source_type="fixture",
-            repo_name=repo_name,
-            repo_root=clone_target,
-            workspace=workspace,
-            logger=logger,
-            model_override=model_override,
-            selected_files=selected_files,
-        )
+        with tracer.run(
+            f"workflow-{run_id}",
+            tags={"workflow": "daddy_subagents_reflective", "source_type": "fixture", "run_id": run_id},
+        ):
+            tracer.log_params({"repo_source": str(repo_path), "repo_name": repo_name, "run_id": run_id})
+            with logger.step("fixture.copy", details={"source": str(repo_path)}) as step:
+                self.workspace_manager.copy_local_repo(repo_path, clone_target)
+                self._ensure_git_repository(clone_target, logger)
+                step["summary"] = f"Prepared fixture {repo_name}"
+            return self._execute(
+                run_id=run_id,
+                repo_url=str(repo_path),
+                source_type="fixture",
+                repo_name=repo_name,
+                repo_root=clone_target,
+                workspace=workspace,
+                logger=logger,
+                tracer=tracer,
+                model_override=model_override,
+                selected_files=selected_files,
+            )
 
     def resume(self, run_id: str) -> WorkflowRunResult:
         workspace = self.workspace_manager.create(run_id)
@@ -208,32 +220,46 @@ class DaddySubagentsReflectiveWorkflow:
         results = checkpoint.completed_results[:]
         work_items = checkpoint.pending_work_items[:]
         attempts = [attempt for result in results for attempt in result.attempts]
-        new_results = self._dispatch_subagents(repo_context, workspace, logger, runtime, work_items, results, checkpoint_store)
-        results.extend(new_results)
-        attempts.extend(attempt for result in new_results for attempt in result.attempts)
-        pending = self._read_pending_integrations(workspace)
-        self._save_checkpoint(
-            checkpoint_store,
-            repo_context,
-            phase="resumed_completed",
-            pending_work_items=[],
-            completed_results=results,
-            pending_integrations=pending,
-            paused=False,
-        )
-        overview_path = workspace.artifacts_dir / "overview.md"
-        workbook_path = report_writer.write_workbook(repo_context, [], attempts, [])
-        summary_path = report_writer.write_json_summary(repo_context, [], results, [])
-        return WorkflowRunResult(
-            run_id=run_id,
-            repo_context=repo_context,
-            work_items=[],
-            subagent_results=results,
-            attempts=attempts,
-            overview_path=str(overview_path),
-            workbook_path=str(workbook_path),
-            summary_path=str(summary_path),
-        )
+        with tracer.run(
+            f"workflow-resume-{run_id}",
+            tags={"workflow": "daddy_subagents_reflective", "source_type": repo_context.source_type, "run_id": run_id},
+        ):
+            tracer.log_params({"run_id": run_id, "resume": True})
+            new_results = self._dispatch_subagents(repo_context, workspace, logger, runtime, work_items, results, checkpoint_store)
+            results.extend(new_results)
+            attempts.extend(attempt for result in new_results for attempt in result.attempts)
+            pending = self._read_pending_integrations(workspace)
+            self._save_checkpoint(
+                checkpoint_store,
+                repo_context,
+                phase="resumed_completed",
+                pending_work_items=[],
+                completed_results=results,
+                pending_integrations=pending,
+                paused=False,
+            )
+            overview_path = workspace.artifacts_dir / "overview.md"
+            workbook_path = report_writer.write_workbook(repo_context, [], attempts, [])
+            summary_path = report_writer.write_json_summary(repo_context, [], results, [])
+            tracer.log_metrics(
+                {
+                    "attempt_count": len(attempts),
+                    "completed_results": len(results),
+                    "pending_integrations": len(pending),
+                }
+            )
+            tracer.log_artifact(workbook_path)
+            tracer.log_artifact(summary_path)
+            return WorkflowRunResult(
+                run_id=run_id,
+                repo_context=repo_context,
+                work_items=[],
+                subagent_results=results,
+                attempts=attempts,
+                overview_path=str(overview_path),
+                workbook_path=str(workbook_path),
+                summary_path=str(summary_path),
+            )
 
     def _execute(
         self,
@@ -245,6 +271,7 @@ class DaddySubagentsReflectiveWorkflow:
         repo_root: Path,
         workspace: RunWorkspace,
         logger: RunLogger,
+        tracer: MlflowTracer,
         model_override: ModelDefinition | None,
         selected_files: list[str] | None = None,
     ) -> WorkflowRunResult:
@@ -268,6 +295,16 @@ class DaddySubagentsReflectiveWorkflow:
             overview = runtime.overview(repo_tree, modules, test_framework)
             overview_path = report_writer.write_overview(overview)
             step["summary"] = f"Overview written to {overview_path.name}"
+        tracer.log_params(
+            {
+                "repo_name": repo_name,
+                "source_type": source_type,
+                "module_count": len(modules),
+                "test_framework": test_framework,
+                "model_id": runtime.model_id,
+            }
+        )
+        tracer.log_text(overview, "overview.md")
         self._save_checkpoint(
             checkpoint_store,
             repo_context,
@@ -340,6 +377,20 @@ class DaddySubagentsReflectiveWorkflow:
         )
         workbook_path = report_writer.write_workbook(repo_context, work_items, attempts, [])
         summary_path = report_writer.write_json_summary(repo_context, work_items, subagent_results, [])
+        tracer.log_metrics(
+            {
+                "work_item_count": len(work_items),
+                "subagent_count": len(subagent_results),
+                "attempt_count": len(attempts),
+                "passed_subagents": sum(1 for item in subagent_results if item.status == "passed"),
+                "pending_integrations": len(pending_integrations),
+            }
+        )
+        tracer.log_artifact(workbook_path)
+        tracer.log_artifact(summary_path)
+        tracer.log_artifact(workspace.logs_dir / "run.log")
+        tracer.log_artifact(workspace.logs_dir / "events.jsonl")
+        tracer.log_artifact(workspace.logs_dir / "dspy_traces.jsonl")
         return WorkflowRunResult(
             run_id=run_id,
             repo_context=repo_context,
@@ -561,7 +612,8 @@ class DaddySubagentsReflectiveWorkflow:
 
     def _repo_name(self, repo_url: str) -> str:
         tail = repo_url.rstrip("/").split("/")[-1]
-        return tail[:-4] if tail.endswith(".git") else tail
+        name = tail[:-4] if tail.endswith(".git") else tail
+        return slugify(name)[:40] or "repo"
 
     def _suggest_test_path(self, source_file_path: str, iteration: int) -> str:
         source = Path(source_file_path)

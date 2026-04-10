@@ -29,6 +29,14 @@ class MlflowSettings:
     enabled: bool = True
     strict: bool = False
 
+    def normalized_tracking_uri(self) -> str:
+        value = self.tracking_uri.strip()
+        if not value:
+            return "http://127.0.0.1:5000"
+        if "://" not in value:
+            return f"http://{value}"
+        return value
+
 
 @dataclass
 class AppConfig:

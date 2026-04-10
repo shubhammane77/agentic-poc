@@ -36,7 +36,7 @@ def prompt_hash(text: str) -> str:
 
 
 def workspace_default_root() -> Path:
-    return Path(tempfile.gettempdir()) / "agentic-testgen"
+    return Path(tempfile.gettempdir()) / "agt"
 
 
 def read_text(path: Path, default: str = "") -> str:

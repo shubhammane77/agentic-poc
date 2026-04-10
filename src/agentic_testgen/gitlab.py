@@ -28,7 +28,18 @@ class GitLabRepositoryManager:
 
     def clone(self, repo_url: str, destination: Path) -> CommandResult:
         auth_url = authenticated_repo_url(repo_url, self.config.gitlab_username, self.config.gitlab_token)
-        result = run_command(["git", "-c", "http.sslVerify=false", "clone", auth_url, str(destination)])
+        result = run_command(
+            [
+                "git",
+                "-c",
+                "http.sslVerify=false",
+                "-c",
+                "core.longpaths=true",
+                "clone",
+                auth_url,
+                str(destination),
+            ]
+        )
         self.logger.log_event(
             "git.clone",
             "completed" if result.ok else "failed",
