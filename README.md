@@ -64,6 +64,8 @@ For local repos (no clone), copy the local project into the run sandbox and exec
 uv run testgen run --repo-path /absolute/path/to/local-maven-repo
 ```
 
+Local repo copy excludes build artifacts by default (for example `target/`, `build/`, `out/`).
+
 You can also set `REPO_PATH` in `.env` and run:
 
 ```bash

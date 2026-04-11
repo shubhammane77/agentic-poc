@@ -43,6 +43,31 @@ class WorkspaceManager:
         )
 
     def copy_local_repo(self, source: Path, destination: Path) -> None:
+        source = source.expanduser().resolve()
+        if not source.exists():
+            raise FileNotFoundError(f"Local repo path does not exist: {source}")
+        if not source.is_dir():
+            raise NotADirectoryError(f"Local repo path is not a directory: {source}")
         if destination.exists():
             shutil.rmtree(destination)
-        shutil.copytree(source, destination)
+        ignore_patterns = [
+            ".git",
+            "__pycache__",
+            "*.pyc",
+            ".DS_Store",
+            "target",
+            "build",
+            "out",
+            ".gradle",
+            "*.class",
+            "*.jar",
+            "*.war",
+            "*.ear",
+        ]
+        shutil.copytree(
+            source,
+            destination,
+            symlinks=True,
+            ignore_dangling_symlinks=True,
+            ignore=shutil.ignore_patterns(*ignore_patterns),
+        )

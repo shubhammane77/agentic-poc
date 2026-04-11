@@ -6,7 +6,8 @@ import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
 from agentic_testgen.config import AppConfig, MlflowSettings
-from agentic_testgen.utils import read_json
+from agentic_testgen.models import CoverageRecord
+from agentic_testgen.utils import CommandResult, read_json
 
 
 class MemoryTests(unittest.TestCase):
@@ -19,6 +20,20 @@ class MemoryTests(unittest.TestCase):
                 mlflow=MlflowSettings(enabled=False),
             )
             workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow.coverage.run_tests_with_coverage = lambda *args, **kwargs: (
+                CommandResult(args=["mvn"], exit_code=0, stdout="", stderr="", duration_seconds=0.01),
+                [
+                    CoverageRecord(
+                        file_path="src/main/java/com/example/Calculator.java",
+                        module=".",
+                        covered_lines=3,
+                        missed_lines=2,
+                        coverage_percent=60.0,
+                        missed_line_numbers=[10, 11],
+                    )
+                ],
+                {},
+            )
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
 
             memory_path = result.repo_context.workspace_root / "artifacts" / "memory.json"
