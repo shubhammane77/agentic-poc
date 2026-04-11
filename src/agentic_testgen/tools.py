@@ -190,11 +190,15 @@ class SafeToolset:
             subagent_id=self.context.subagent_id,
             details={"message": message, "worktree": str(self.context.active_worktree)},
         ) as step:
-            run_command(["git", "add", "."], cwd=self.context.active_worktree)
-            status = run_command(["git", "status", "--short"], cwd=self.context.active_worktree)
+            if not self.context.written_files:
+                step["summary"] = "No generated files to commit"
+                return ""
+            for file_path in self.context.written_files:
+                run_command(["git", "add", file_path], cwd=self.context.active_worktree)
+            status = run_command(["git", "diff", "--cached", "--name-only"], cwd=self.context.active_worktree)
             if not status.stdout.strip():
                 step["summary"] = "No changes to commit"
-                step["git_status"] = status.stdout
+                step["git_staged"] = status.stdout
                 return ""
             commit = run_command(["git", "commit", "-m", message], cwd=self.context.active_worktree)
             if not commit.ok:
@@ -203,7 +207,7 @@ class SafeToolset:
             rev = run_command(["git", "rev-parse", "HEAD"], cwd=self.context.active_worktree)
             commit_hash = rev.stdout.strip()
             step["summary"] = f"Committed {commit_hash[:7]}"
-            step["git_status"] = status.stdout[:800]
+            step["git_staged"] = status.stdout[:800]
             return commit_hash
 
     def integrate_worktree_result(self, commit_hash: str) -> str:

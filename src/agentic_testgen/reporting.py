@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -105,6 +106,56 @@ class ReportWriter:
         )
         return path
 
+    def write_file_coverage_comparison(self, rows: list[dict[str, object]]) -> tuple[Path, Path, Path]:
+        json_path = self.artifacts_dir / "file-coverage-comparison.json"
+        md_path = self.artifacts_dir / "file-coverage-comparison.md"
+        csv_path = self.artifacts_dir / "file-coverage-comparison.csv"
+        write_json(json_path, rows)
+        lines = [
+            "# File Coverage Comparison",
+            "",
+            "| file | module | before % | after % | delta % | before missed | after missed | missed delta | status |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---|",
+        ]
+        for row in rows:
+            lines.append(
+                f"| {row.get('file_path', '')} | {row.get('module', '')} | {row.get('before_coverage_percent', '')} | "
+                f"{row.get('after_coverage_percent', '')} | {row.get('coverage_delta', '')} | "
+                f"{row.get('before_missed_lines', '')} | {row.get('after_missed_lines', '')} | "
+                f"{row.get('missed_line_delta', '')} | {row.get('status', '')} |"
+            )
+        md_path.write_text("\n".join(lines), encoding="utf-8")
+        with csv_path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(
+                [
+                    "file_path",
+                    "module",
+                    "before_coverage_percent",
+                    "after_coverage_percent",
+                    "coverage_delta",
+                    "before_missed_lines",
+                    "after_missed_lines",
+                    "missed_line_delta",
+                    "status",
+                ]
+            )
+            for row in rows:
+                writer.writerow(
+                    [
+                        row.get("file_path", ""),
+                        row.get("module", ""),
+                        row.get("before_coverage_percent", ""),
+                        row.get("after_coverage_percent", ""),
+                        row.get("coverage_delta", ""),
+                        row.get("before_missed_lines", ""),
+                        row.get("after_missed_lines", ""),
+                        row.get("missed_line_delta", ""),
+                        row.get("status", ""),
+                    ]
+                )
+        return json_path, md_path, csv_path
+
     def write_workbook(
         self,
         repo_context: RepoContext,
@@ -117,6 +168,7 @@ class ReportWriter:
         coverage_context = read_json(self.artifacts_dir / "coverage-context.json", default={}) or {}
         global_coverage = coverage_context.get("global_coverage", {})
         context_files = coverage_context.get("file_coverage", [])
+        file_coverage_comparison = read_json(self.artifacts_dir / "file-coverage-comparison.json", default=[]) or []
         sheets = {
             "runs": [
                 ["run_id", "repo_name", "repo_url", "clone_path", "source_type"],
@@ -176,6 +228,17 @@ class ReportWriter:
                 "covered_lines",
                 "missed_lines",
                 "report_count",
+            ]],
+            "file_coverage_comparison": [[
+                "file_path",
+                "module",
+                "before_coverage_percent",
+                "after_coverage_percent",
+                "coverage_delta",
+                "before_missed_lines",
+                "after_missed_lines",
+                "missed_line_delta",
+                "status",
             ]],
         }
 
@@ -266,6 +329,20 @@ class ReportWriter:
                     "",
                 ]
             )
+        for item in file_coverage_comparison:
+            sheets["file_coverage_comparison"].append(
+                [
+                    item.get("file_path", ""),
+                    item.get("module", ""),
+                    item.get("before_coverage_percent", ""),
+                    item.get("after_coverage_percent", ""),
+                    item.get("coverage_delta", ""),
+                    item.get("before_missed_lines", ""),
+                    item.get("after_missed_lines", ""),
+                    item.get("missed_line_delta", ""),
+                    item.get("status", ""),
+                ]
+            )
 
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as zf:
             zf.writestr(
@@ -284,6 +361,7 @@ class ReportWriter:
                 '<Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet6.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet7.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 "</Types>",
             )
             zf.writestr(
@@ -324,6 +402,7 @@ class ReportWriter:
                 '<sheet name="model_eval" sheetId="4" r:id="rId4"/>'
                 '<sheet name="coverage_summary" sheetId="5" r:id="rId5"/>'
                 '<sheet name="coverage_context" sheetId="6" r:id="rId6"/>'
+                '<sheet name="file_coverage_comparison" sheetId="7" r:id="rId7"/>'
                 "</sheets>"
                 "</workbook>",
             )
@@ -337,7 +416,8 @@ class ReportWriter:
                 '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>'
                 '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>'
                 '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet6.xml"/>'
-                '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet7.xml"/>'
+                '<Relationship Id="rId8" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
                 "</Relationships>",
             )
             zf.writestr(
