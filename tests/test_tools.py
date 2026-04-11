@@ -57,6 +57,22 @@ class ToolWriteGuardTests(unittest.TestCase):
                     "class GeneratedTest {}",
                 )
 
+    def test_allows_rewrite_for_newly_created_test_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            toolset = self._toolset(root)
+            relative_path = "module-b/src/test/java/com/example/GeneratedTest.java"
+            toolset.write_new_test_file(
+                relative_path,
+                "class GeneratedTest {}",
+            )
+            toolset.write_new_test_file(
+                relative_path,
+                "class GeneratedTest { void update() {} }",
+            )
+            content = (root / relative_path).read_text(encoding="utf-8")
+            self.assertIn("update", content)
+
 
 if __name__ == "__main__":
     unittest.main()

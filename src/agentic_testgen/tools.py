@@ -152,12 +152,13 @@ class SafeToolset:
             target = self._resolve_active_path(file_path)
             if not self._is_within_test_tree(target):
                 raise ValueError("write_new_test_file may only write inside src/test/java")
-            if target.exists():
+            relative = str(target.relative_to(self.active_root_resolved))
+            if target.exists() and relative not in self.context.written_files:
                 raise ValueError(f"Refusing to overwrite existing file: {file_path}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
-            relative = str(target.relative_to(self.active_root_resolved))
-            self.context.written_files.append(relative)
+            if relative not in self.context.written_files:
+                self.context.written_files.append(relative)
             step["summary"] = f"Wrote {relative}"
             step["resolved_path"] = str(target)
             step["allowed_test_tree"] = "src/test/java"
@@ -248,7 +249,6 @@ class SafeToolset:
                 result,
             )
             self.context.last_single_test_exit_code = result.exit_code
-            output = (result.stdout + "\n" + result.stderr).strip()
             step["summary"] = f"Ran {class_name}"
             step["resolved_path"] = str(target)
             step["module_root"] = str(module_root)
@@ -257,7 +257,9 @@ class SafeToolset:
             step["stdout_preview"] = result.stdout[:500]
             step["stderr_preview"] = result.stderr[:500]
             step["maven_log_paths"] = log_paths
-            return output
+            if result.ok:
+                return f"success: single test {class_name} passed"
+            return (result.stdout + "\n" + result.stderr).strip()
 
     def run_project_tests_with_coverage(self) -> str:
         with self.context.logger.step(
@@ -277,7 +279,9 @@ class SafeToolset:
             step["stderr_preview"] = result.stderr[:500]
             step["report_paths"] = [item.report_path for item in reports[:10]]
             step["maven_log_paths"] = log_paths
-            return f"{result.stdout}\n{result.stderr}".strip()
+            if result.ok:
+                return "success: project tests with coverage passed"
+            return (result.stdout + "\n" + result.stderr).strip()
 
     def cleanup_worktree(self) -> None:
         if self.context.active_worktree and self.context.active_worktree.exists():
