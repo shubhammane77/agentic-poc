@@ -56,6 +56,11 @@ def run(
         typer.echo(f"workbook={result.workbook_path}")
         typer.echo(f"subagent_results={len(result.subagent_results)}")
         typer.echo(f"work_items={len(result.work_items)}")
+        token_budget = read_json(Path(result.summary_path).parent / "token-budget.json", default={})
+        if token_budget:
+            typer.echo(f"token_total={token_budget.get('total_tokens', 0)}")
+            typer.echo(f"token_input={token_budget.get('input_tokens', 0)}")
+            typer.echo(f"token_output={token_budget.get('output_tokens', 0)}")
         return
     effective_repo_url = repo_url or config.repo_url
     if not effective_repo_url:
@@ -67,6 +72,11 @@ def run(
     typer.echo(f"workbook={result.workbook_path}")
     typer.echo(f"subagent_results={len(result.subagent_results)}")
     typer.echo(f"work_items={len(result.work_items)}")
+    token_budget = read_json(Path(result.summary_path).parent / "token-budget.json", default={})
+    if token_budget:
+        typer.echo(f"token_total={token_budget.get('total_tokens', 0)}")
+        typer.echo(f"token_input={token_budget.get('input_tokens', 0)}")
+        typer.echo(f"token_output={token_budget.get('output_tokens', 0)}")
 
 
 @app.command()
@@ -83,6 +93,11 @@ def status(run_id: str) -> None:
     typer.echo(f"pending_work_items={len(checkpoint.pending_work_items)}")
     typer.echo(f"completed_results={len(checkpoint.completed_results)}")
     typer.echo(f"pending_integrations={len(checkpoint.pending_integrations)}")
+    token_budget = read_json(workspace.artifacts_dir / "token-budget.json", default={})
+    if token_budget:
+        typer.echo(f"token_total={token_budget.get('total_tokens', 0)}")
+        typer.echo(f"token_input={token_budget.get('input_tokens', 0)}")
+        typer.echo(f"token_output={token_budget.get('output_tokens', 0)}")
 
 
 @app.command()
@@ -116,6 +131,11 @@ def resume(run_id: str) -> None:
     result = workflow.resume(run_id)
     typer.echo(f"resumed={result.run_id}")
     typer.echo(f"subagent_results={len(result.subagent_results)}")
+    token_budget = read_json(Path(result.summary_path).parent / "token-budget.json", default={})
+    if token_budget:
+        typer.echo(f"token_total={token_budget.get('total_tokens', 0)}")
+        typer.echo(f"token_input={token_budget.get('input_tokens', 0)}")
+        typer.echo(f"token_output={token_budget.get('output_tokens', 0)}")
 
 
 @app.command()

@@ -1,10 +1,13 @@
 import unittest
+from pathlib import Path
+import tempfile
 
 import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
 from agentic_testgen.config import AppConfig, MlflowSettings
 from agentic_testgen.models import FileWorkItem, IntegrationDecision
+from agentic_testgen.workspace import WorkspaceManager
 
 
 class BatchingTests(unittest.TestCase):
@@ -38,6 +41,32 @@ class BatchingTests(unittest.TestCase):
         ordered = workflow._sort_integrations(decisions)
         self.assertEqual("bbb", ordered[0].commit_hash)
         self.assertEqual("aaa", ordered[1].commit_hash)
+
+    def test_dedupes_work_items_by_file_path(self) -> None:
+        workflow = DaddySubagentsReflectiveWorkflow(AppConfig(mlflow=MlflowSettings(enabled=False)))
+        items = [
+            FileWorkItem("src/main/java/A.java", ".", 10.0, 1, 9, [1], priority_rank=2),
+            FileWorkItem("src/main/java/A.java", ".", 20.0, 2, 8, [2], priority_rank=1),
+            FileWorkItem("src/main/java/B.java", ".", 30.0, 3, 7, [3], priority_rank=3),
+        ]
+        deduped = workflow._dedupe_work_items(items)
+        self.assertEqual(2, len(deduped))
+        self.assertEqual("src/main/java/A.java", deduped[0].file_path)
+        self.assertEqual("src/main/java/B.java", deduped[1].file_path)
+
+    def test_append_integration_replaces_same_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            workflow = DaddySubagentsReflectiveWorkflow(
+                AppConfig(workspace_root=Path(tmpdir), mlflow=MlflowSettings(enabled=False))
+            )
+            workspace = WorkspaceManager(Path(tmpdir)).create("run_test")
+            first = IntegrationDecision("a", "branch/a", "aaa", "pending_review", "src/main/java/A.java", "ok", 1)
+            second = IntegrationDecision("b", "branch/b", "bbb", "pending_review", "src/main/java/A.java", "ok", 2)
+            workflow._append_integration(workspace, first)
+            workflow._append_integration(workspace, second)
+            queued = workflow._read_pending_integrations(workspace)
+            self.assertEqual(1, len(queued))
+            self.assertEqual("bbb", queued[0].commit_hash)
 
 
 if __name__ == "__main__":

@@ -260,6 +260,7 @@ class DaddySubagentsReflectiveWorkflow:
                 workspace,
                 logger,
                 runtime,
+                tracer,
                 work_items,
                 results,
                 checkpoint_store,
@@ -292,6 +293,8 @@ class DaddySubagentsReflectiveWorkflow:
                 workbook_path=workbook_path,
                 summary_path=summary_path,
             )
+            token_budget_path = self._write_token_budget_artifact(tracer, workspace, logger)
+            tracer.log_artifact(token_budget_path)
             tracer.log_metrics(
                 {
                     "attempt_count": len(attempts),
@@ -344,6 +347,15 @@ class DaddySubagentsReflectiveWorkflow:
         self.memory.initialize_run_memory(self._run_memory_path(workspace), repo_context)
         with logger.step("repo.analyze", details={"modules": modules}) as step:
             overview = runtime.overview(repo_tree, modules)
+            tracer.tag_last_trace(
+                {
+                    "run_id": run_id,
+                    "workflow": "daddy_subagents_reflective",
+                    "dspy_call": "daddy.overview",
+                    "source_type": source_type,
+                    "repo_name": repo_name,
+                }
+            )
             overview_path = report_writer.write_overview(overview)
             step["summary"] = f"Overview written to {overview_path.name}"
         tracer.log_params(
@@ -387,7 +399,7 @@ class DaddySubagentsReflectiveWorkflow:
             work_items,
         )
         if runtime.enabled:
-            self._run_daddy_react(repo_context, workspace, logger, runtime, work_items)
+            self._run_daddy_react(repo_context, workspace, logger, runtime, tracer, work_items)
         self._save_checkpoint(
             checkpoint_store,
             repo_context,
@@ -436,6 +448,7 @@ class DaddySubagentsReflectiveWorkflow:
             workspace,
             logger,
             runtime,
+            tracer,
             work_items,
             [],
             checkpoint_store,
@@ -499,6 +512,8 @@ class DaddySubagentsReflectiveWorkflow:
             summary_path=summary_path,
             coverage_comparison_path=coverage_comparison_path,
         )
+        token_budget_path = self._write_token_budget_artifact(tracer, workspace, logger)
+        tracer.log_artifact(token_budget_path)
         return WorkflowRunResult(
             run_id=run_id,
             repo_context=repo_context,
@@ -517,6 +532,7 @@ class DaddySubagentsReflectiveWorkflow:
         workspace: RunWorkspace,
         logger: RunLogger,
         runtime: DSPyRuntime,
+        tracer: MlflowTracer,
         work_items: list[FileWorkItem],
         existing_results: list[SubagentResult],
         checkpoint_store: CheckpointStore,
@@ -524,12 +540,16 @@ class DaddySubagentsReflectiveWorkflow:
         coverage_context_path: Path,
     ) -> list[SubagentResult]:
         results: list[SubagentResult] = []
-        pending_queue = work_items[:]
+        completed_files = {item.file_path for item in existing_results}
+        pending_queue = self._dedupe_work_items(work_items, exclude_files=completed_files)
         in_flight: dict[Any, FileWorkItem] = {}
+        in_flight_files: set[str] = set()
         run_memory_path = self._run_memory_path(workspace)
         with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel_subagents)) as pool:
             while pending_queue and len(in_flight) < max(1, self.config.max_parallel_subagents):
                 item = pending_queue.pop(0)
+                if item.file_path in in_flight_files:
+                    continue
                 if self._pause_requested(workspace):
                     break
                 item.assigned_subagent_id = item.assigned_subagent_id or f"subagent_{item.priority_rank:03d}"
@@ -539,21 +559,27 @@ class DaddySubagentsReflectiveWorkflow:
                     workspace,
                     logger,
                     runtime,
+                    tracer,
                     item,
                     checkpoint_store,
                     baseline_summary,
                     coverage_context_path,
                 )
                 in_flight[future] = item
+                in_flight_files.add(item.file_path)
             while in_flight:
                 done, _pending = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
                 for future in done:
                     item = in_flight.pop(future)
+                    in_flight_files.discard(item.file_path)
                     result = future.result()
                     self.memory.record_result(run_memory_path, repo_context, item, result)
                     results.append(result)
+                    completed_files.add(result.file_path)
                     while pending_queue and len(in_flight) < max(1, self.config.max_parallel_subagents):
                         next_item = pending_queue.pop(0)
+                        if next_item.file_path in completed_files or next_item.file_path in in_flight_files:
+                            continue
                         if self._pause_requested(workspace):
                             pending_queue.insert(0, next_item)
                             break
@@ -564,12 +590,14 @@ class DaddySubagentsReflectiveWorkflow:
                             workspace,
                             logger,
                             runtime,
+                            tracer,
                             next_item,
                             checkpoint_store,
                             baseline_summary,
                             coverage_context_path,
                         )
                         in_flight[next_future] = next_item
+                        in_flight_files.add(next_item.file_path)
                     pending_items = pending_queue + list(in_flight.values())
                     self._save_checkpoint(
                         checkpoint_store,
@@ -714,6 +742,31 @@ class DaddySubagentsReflectiveWorkflow:
         tracer.log_artifact(workspace.logs_dir / "events.jsonl")
         tracer.log_artifact(workspace.logs_dir / "dspy_traces.jsonl")
 
+    def _write_token_budget_artifact(
+        self,
+        tracer: MlflowTracer,
+        workspace: RunWorkspace,
+        logger: RunLogger,
+    ) -> Path:
+        token_budget = tracer.token_usage_summary()
+        token_budget_path = workspace.artifacts_dir / "token-budget.json"
+        write_json(token_budget_path, token_budget)
+        logger.log_event(
+            "tokens.summary",
+            "completed",
+            summary=f"total_tokens={token_budget.get('total_tokens', 0)}",
+            details=token_budget,
+        )
+        tracer.log_metrics(
+            {
+                "token_input": token_budget.get("input_tokens", 0),
+                "token_output": token_budget.get("output_tokens", 0),
+                "token_total": token_budget.get("total_tokens", 0),
+                "token_traces": token_budget.get("trace_count", 0),
+            }
+        )
+        return token_budget_path
+
     def _compare_file_coverage(
         self,
         before: list[CoverageRecord],
@@ -756,6 +809,7 @@ class DaddySubagentsReflectiveWorkflow:
         workspace: RunWorkspace,
         logger: RunLogger,
         runtime: DSPyRuntime,
+        tracer: MlflowTracer,
         item: FileWorkItem,
         checkpoint_store: CheckpointStore,
         baseline_summary: GlobalCoverageSummary,
@@ -835,6 +889,16 @@ class DaddySubagentsReflectiveWorkflow:
                     file_path=item.file_path,
                     suggested_test_path=suggested_test_path,
                 )
+                tracer.tag_last_trace(
+                    {
+                        "run_id": repo_context.run_id,
+                        "workflow": "daddy_subagents_reflective",
+                        "dspy_call": "subagent.react",
+                        "subagent_id": subagent_id,
+                        "iteration": str(iteration),
+                        "file_path": item.file_path,
+                    }
+                )
                 trajectory = getattr(prediction, "trajectory", {})
                 logger.log_trace(
                     {
@@ -855,6 +919,16 @@ class DaddySubagentsReflectiveWorkflow:
                     validation_output = "No test file was generated."
                 tool_summary = json.dumps(trajectory, default=str)[:4000]
                 reflective_summary = runtime.reflect(objective, validation_output, "\n".join(prior_failures))
+                tracer.tag_last_trace(
+                    {
+                        "run_id": repo_context.run_id,
+                        "workflow": "daddy_subagents_reflective",
+                        "dspy_call": "subagent.reflect",
+                        "subagent_id": subagent_id,
+                        "iteration": str(iteration),
+                        "file_path": item.file_path,
+                    }
+                )
                 attempt = AttemptRecord(
                     run_id=repo_context.run_id,
                     subagent_id=subagent_id,
@@ -1006,11 +1080,12 @@ class DaddySubagentsReflectiveWorkflow:
         memory_text = "\n".join(f"- {insight}" for insight in memory_insights[:4])
         return (
             "You are a Java unit-test generation subagent working inside a Git worktree.\n"
-            "Write meaningful tests only for the assigned source file.\n"
+            "Write fresh, meaningful behavior-driven tests only for the assigned source file.\n"
             "Rules:\n"
             "- Create only a new test file.\n"
             "- Do not modify production code.\n"
             "- Do not modify existing tests.\n"
+            "- Do not depend on existing tests; create fresh test cases irrespective of existing tests.\n"
             "- Use folder/file search and file reads before writing.\n"
             "- Pass the full absolute file path to write_new_test_file.\n"
             "- Run the single test after writing.\n"
@@ -1018,7 +1093,7 @@ class DaddySubagentsReflectiveWorkflow:
             f"Coverage context artifact: {coverage_context_path}\n"
             f"Global coverage baseline: {baseline_summary.coverage_percent}% "
             f"(covered={baseline_summary.covered_lines}, missed={baseline_summary.missed_lines})\n"
-            f"Coverage: {item.coverage_percent}% with missed lines {item.missed_line_numbers}\n"
+            f"Current file coverage: {item.coverage_percent}%\n"
             f"Shared memory:\n{memory_text or '- none yet'}\n"
             f"Suggested test path: {suggested_test_path}\n"
             f"Iteration: {iteration}\n"
@@ -1067,7 +1142,11 @@ class DaddySubagentsReflectiveWorkflow:
 
     def _append_integration(self, workspace: RunWorkspace, decision: IntegrationDecision) -> None:
         current = self._read_pending_integrations(workspace)
-        current = [item for item in current if item.commit_hash != decision.commit_hash]
+        current = [
+            item
+            for item in current
+            if item.commit_hash != decision.commit_hash and item.file_path != decision.file_path
+        ]
         current.append(decision)
         write_json(workspace.integrations_path, [item.to_json() for item in self._sort_integrations(current)])
 
@@ -1082,6 +1161,21 @@ class DaddySubagentsReflectiveWorkflow:
         if effective_max is None or effective_max <= 0:
             return work_items
         return work_items[:effective_max]
+
+    def _dedupe_work_items(
+        self,
+        work_items: list[FileWorkItem],
+        *,
+        exclude_files: set[str] | None = None,
+    ) -> list[FileWorkItem]:
+        seen: set[str] = set(exclude_files or set())
+        deduped: list[FileWorkItem] = []
+        for item in sorted(work_items, key=lambda value: (value.priority_rank or 0, value.file_path)):
+            if item.file_path in seen:
+                continue
+            seen.add(item.file_path)
+            deduped.append(item)
+        return deduped
 
     def _sort_integrations(self, decisions: list[IntegrationDecision]) -> list[IntegrationDecision]:
         return sorted(decisions, key=lambda item: (item.priority_rank or 0, item.file_path, item.commit_hash))
@@ -1246,6 +1340,7 @@ class DaddySubagentsReflectiveWorkflow:
         workspace: RunWorkspace,
         logger: RunLogger,
         runtime: DSPyRuntime,
+        tracer: MlflowTracer,
         work_items: list[FileWorkItem],
     ) -> None:
         toolset = SafeToolset(
@@ -1267,6 +1362,14 @@ class DaddySubagentsReflectiveWorkflow:
         try:
             react = dspy.ReAct("objective -> answer", tools=toolset.build_repo_dspy_tools(), max_iters=4)
             prediction = react(objective=objective)
+            tracer.tag_last_trace(
+                {
+                    "run_id": repo_context.run_id,
+                    "workflow": "daddy_subagents_reflective",
+                    "dspy_call": "daddy.react",
+                    "subagent_id": "daddy",
+                }
+            )
             logger.log_trace(
                 {
                     "run_id": repo_context.run_id,

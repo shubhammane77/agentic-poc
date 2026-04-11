@@ -15,6 +15,7 @@ class MlflowTracer:
         self.settings = settings
         self.logger = logger
         self.mlflow = None
+        self._trace_ids: set[str] = set()
         if settings.enabled:
             try:
                 import mlflow  # type: ignore
@@ -124,3 +125,49 @@ class MlflowTracer:
             self.mlflow.log_artifact(str(path))
         except Exception as exc:  # pragma: no cover
             self.logger.log_event("mlflow.log_artifact", "skipped", summary=str(exc))
+
+    def tag_last_trace(self, tags: dict[str, str]) -> None:
+        if not self.active:
+            return
+        try:
+            trace_id = self.mlflow.get_last_active_trace_id()
+            if not trace_id:
+                return
+            self._trace_ids.add(trace_id)
+            for key, value in tags.items():
+                self.mlflow.set_trace_tag(trace_id, key, str(value))
+        except Exception as exc:  # pragma: no cover
+            self.logger.log_event("mlflow.tag_trace", "skipped", summary=str(exc))
+
+    def token_usage_summary(self) -> dict[str, int]:
+        summary = {
+            "trace_count": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+        }
+        if not self.active:
+            return summary
+        for trace_id in sorted(self._trace_ids):
+            try:
+                trace = self.mlflow.get_trace(trace_id)
+            except Exception as exc:  # pragma: no cover
+                self.logger.log_event("mlflow.get_trace", "skipped", summary=str(exc), details={"trace_id": trace_id})
+                continue
+            if not trace:
+                continue
+            usage = getattr(getattr(trace, "info", None), "token_usage", None) or {}
+            input_tokens = self._safe_int(usage.get("input_tokens", usage.get("prompt_tokens", 0)))
+            output_tokens = self._safe_int(usage.get("output_tokens", usage.get("completion_tokens", 0)))
+            total_tokens = self._safe_int(usage.get("total_tokens", input_tokens + output_tokens))
+            summary["trace_count"] += 1
+            summary["input_tokens"] += input_tokens
+            summary["output_tokens"] += output_tokens
+            summary["total_tokens"] += total_tokens
+        return summary
+
+    def _safe_int(self, value: Any) -> int:
+        try:
+            return int(value or 0)
+        except Exception:
+            return 0
