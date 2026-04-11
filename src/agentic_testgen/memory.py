@@ -18,10 +18,10 @@ class MemoryEntry:
     file_path: str
     module: str
     status: str
-    testing_stack: str
     attempt_count: int
     lesson: str
     failure_summary: str
+    failure_feedback: list[str]
     generated_test_files: list[str]
 
     def to_json(self) -> dict[str, Any]:
@@ -32,10 +32,10 @@ class MemoryEntry:
             "file_path": self.file_path,
             "module": self.module,
             "status": self.status,
-            "testing_stack": self.testing_stack,
             "attempt_count": self.attempt_count,
             "lesson": self.lesson,
             "failure_summary": self.failure_summary,
+            "failure_feedback": self.failure_feedback,
             "generated_test_files": self.generated_test_files,
         }
 
@@ -59,8 +59,6 @@ class MemoryManager:
                     "repo_name": repo_context.repo_name,
                     "repo_url": repo_context.repo_url,
                     "repo_key": self._repo_key(repo_context),
-                    "test_framework": repo_context.test_framework,
-                    "test_framework_version": repo_context.test_framework_version,
                     "updated_at": utc_timestamp(),
                 }
             )
@@ -84,8 +82,6 @@ class MemoryManager:
             {
                 "repo_name": repo_context.repo_name,
                 "repo_url": repo_context.repo_url,
-                "test_framework": repo_context.test_framework,
-                "test_framework_version": repo_context.test_framework_version,
                 "successes": [],
                 "failures": [],
                 "updated_at": utc_timestamp(),
@@ -93,8 +89,6 @@ class MemoryManager:
         )
         repo_memory["repo_name"] = repo_context.repo_name
         repo_memory["repo_url"] = repo_context.repo_url
-        repo_memory["test_framework"] = repo_context.test_framework
-        repo_memory["test_framework_version"] = repo_context.test_framework_version
         repo_memory[bucket_name] = self._merge_entry(repo_memory.get(bucket_name, []), entry)
         repo_memory["updated_at"] = utc_timestamp()
         write_json(self.global_memory_path, global_payload)
@@ -128,8 +122,6 @@ class MemoryManager:
             "repo_name": repo_context.repo_name,
             "repo_url": repo_context.repo_url,
             "repo_key": self._repo_key(repo_context),
-            "test_framework": repo_context.test_framework,
-            "test_framework_version": repo_context.test_framework_version,
             "updated_at": utc_timestamp(),
             "successes": [],
             "failures": [],
@@ -146,10 +138,10 @@ class MemoryManager:
             file_path=result.file_path,
             module=item.module,
             status=result.status,
-            testing_stack=repo_context.testing_stack_display,
             attempt_count=len(result.attempts),
             lesson=self._lesson_text(result),
             failure_summary=result.error_message[:4000],
+            failure_feedback=self._failure_feedback(result),
             generated_test_files=result.generated_test_files[:],
         ).to_json()
 
@@ -157,8 +149,25 @@ class MemoryManager:
         if result.status == "passed":
             text = result.final_summary or "Generated tests passed validation."
         else:
-            text = result.error_message or result.final_summary or "Generated tests failed validation."
+            reason = result.error_message or "Generated tests failed validation."
+            summary = result.final_summary or ""
+            text = f"Failure reason: {reason}" if not summary else f"Failure reason: {reason}\nAgent reflection: {summary}"
         return text[:1000]
+
+    def _failure_feedback(self, result: SubagentResult) -> list[str]:
+        if result.status == "passed":
+            return []
+        feedback: list[str] = []
+        for attempt in result.attempts:
+            reason = (attempt.failure_summary or "").strip()
+            reflection = (attempt.reflective_summary or "").strip()
+            if reason:
+                feedback.append(f"Attempt {attempt.iteration} failure: {reason[:600]}")
+            if reflection:
+                feedback.append(f"Attempt {attempt.iteration} reflection: {reflection[:600]}")
+        if not feedback and result.error_message:
+            feedback.append(result.error_message[:600])
+        return feedback[:8]
 
     def _merge_entry(self, entries: list[dict[str, Any]], entry: dict[str, Any]) -> list[dict[str, Any]]:
         filtered = [
@@ -191,18 +200,16 @@ class MemoryManager:
         return sorted(
             deduped.values(),
             key=lambda entry: (
-                self._score_entry(entry, repo_context, item),
+                self._score_entry(entry, item),
                 entry.get("timestamp", ""),
             ),
             reverse=True,
         )
 
-    def _score_entry(self, entry: dict[str, Any], repo_context: RepoContext, item: FileWorkItem) -> int:
+    def _score_entry(self, entry: dict[str, Any], item: FileWorkItem) -> int:
         score = 0
         if entry.get("module") == item.module:
             score += 4
-        if entry.get("testing_stack") == repo_context.testing_stack_display:
-            score += 3
         if self._shared_parent(entry.get("file_path", ""), item.file_path):
             score += 2
         if entry.get("status") == "passed":

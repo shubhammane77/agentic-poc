@@ -5,7 +5,7 @@ from pathlib import Path
 import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig
+from agentic_testgen.config import AppConfig, MlflowSettings
 from agentic_testgen.utils import read_json
 
 
@@ -16,6 +16,7 @@ class MemoryTests(unittest.TestCase):
             config = AppConfig(
                 gitlab_token="dummy-token",
                 workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
             )
             workflow = DaddySubagentsReflectiveWorkflow(config)
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
@@ -29,8 +30,8 @@ class MemoryTests(unittest.TestCase):
             run_memory = read_json(memory_path, default={})
             global_memory = read_json(global_memory_path, default={})
 
-            self.assertEqual("junit5", run_memory.get("test_framework"))
             self.assertGreaterEqual(len(run_memory.get("failures", [])), 1)
+            self.assertGreaterEqual(len(run_memory.get("failures", [])[0].get("failure_feedback", [])), 1)
             self.assertIn("repos", global_memory)
             repo_entries = list(global_memory["repos"].values())
             self.assertEqual(1, len(repo_entries))

@@ -3,13 +3,15 @@ import unittest
 import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig
+from agentic_testgen.config import AppConfig, MlflowSettings
 from agentic_testgen.models import FileWorkItem, IntegrationDecision
 
 
 class BatchingTests(unittest.TestCase):
     def test_limits_work_items_to_configured_top_n(self) -> None:
-        workflow = DaddySubagentsReflectiveWorkflow(AppConfig(max_files_per_run=5))
+        workflow = DaddySubagentsReflectiveWorkflow(
+            AppConfig(max_files_per_run=5, mlflow=MlflowSettings(enabled=False))
+        )
         items = [
             FileWorkItem(
                 file_path=f"src/main/java/com/example/File{i}.java",
@@ -28,7 +30,7 @@ class BatchingTests(unittest.TestCase):
         self.assertEqual(5, limited[-1].priority_rank)
 
     def test_sorts_integrations_by_priority_rank(self) -> None:
-        workflow = DaddySubagentsReflectiveWorkflow(AppConfig())
+        workflow = DaddySubagentsReflectiveWorkflow(AppConfig(mlflow=MlflowSettings(enabled=False)))
         decisions = [
             IntegrationDecision("a", "branch/a", "aaa", "pending_review", "b/File.java", "ok", priority_rank=2),
             IntegrationDecision("b", "branch/b", "bbb", "pending_review", "a/File.java", "ok", priority_rank=1),

@@ -32,14 +32,34 @@ def main() -> None:
 @app.command()
 def run(
     repo_url: str | None = typer.Option(None, "--repo-url"),
+    repo_path: Path | None = typer.Option(None, "--repo-path"),
     run_id: str | None = None,
     max_files: int | None = None,
 ) -> None:
     """Run the daddy_subagents_reflective workflow against a GitLab repo."""
     config = _config()
+    effective_repo_path = repo_path or (Path(config.repo_path).expanduser() if config.repo_path else None)
+    if effective_repo_path and repo_url:
+        raise typer.BadParameter("Provide only one of --repo-url or --repo-path")
+    if effective_repo_path:
+        if not effective_repo_path.exists() or not effective_repo_path.is_dir():
+            raise typer.BadParameter(f"Invalid --repo-path: {effective_repo_path}")
+        workflow = DaddySubagentsReflectiveWorkflow(config)
+        result = workflow.run_from_local_path(
+            effective_repo_path.resolve(),
+            run_id=run_id,
+            source_name=effective_repo_path.name,
+            max_files=max_files,
+        )
+        typer.echo(f"run_id={result.run_id}")
+        typer.echo(f"overview={result.overview_path}")
+        typer.echo(f"workbook={result.workbook_path}")
+        typer.echo(f"subagent_results={len(result.subagent_results)}")
+        typer.echo(f"work_items={len(result.work_items)}")
+        return
     effective_repo_url = repo_url or config.repo_url
     if not effective_repo_url:
-        raise typer.BadParameter("Provide --repo-url or set REPO_URL in .env")
+        raise typer.BadParameter("Provide --repo-path/--repo-url or set REPO_PATH/REPO_URL in .env")
     workflow = DaddySubagentsReflectiveWorkflow(config)
     result = workflow.run_from_gitlab(effective_repo_url, run_id=run_id, max_files=max_files)
     typer.echo(f"run_id={result.run_id}")

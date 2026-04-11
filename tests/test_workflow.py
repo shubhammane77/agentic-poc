@@ -5,8 +5,8 @@ from pathlib import Path
 import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig
-from agentic_testgen.models import FileWorkItem, RepoContext
+from agentic_testgen.config import AppConfig, MlflowSettings
+from agentic_testgen.models import FileWorkItem, GlobalCoverageSummary, RepoContext
 
 
 class WorkflowTests(unittest.TestCase):
@@ -16,6 +16,7 @@ class WorkflowTests(unittest.TestCase):
             config = AppConfig(
                 gitlab_token="dummy-token",
                 workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
             )
             workflow = DaddySubagentsReflectiveWorkflow(config)
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
@@ -30,6 +31,7 @@ class WorkflowTests(unittest.TestCase):
             config = AppConfig(
                 gitlab_token="dummy-token",
                 workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
             )
             workflow = DaddySubagentsReflectiveWorkflow(config)
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
@@ -39,16 +41,14 @@ class WorkflowTests(unittest.TestCase):
             self.assertTrue((result.repo_context.workspace_root / "artifacts" / "summary.json").exists())
             self.assertEqual(0.0, comparison.percentage_increase)
 
-    def test_subagent_objective_includes_testing_stack(self) -> None:
-        workflow = DaddySubagentsReflectiveWorkflow(AppConfig())
+    def test_subagent_objective_avoids_framework_specific_guidance(self) -> None:
+        workflow = DaddySubagentsReflectiveWorkflow(AppConfig(mlflow=MlflowSettings(enabled=False)))
         repo_context = RepoContext(
             run_id="run_123",
             repo_url="https://gitlab.example.com/group/project.git",
             repo_name="project",
             clone_path=Path("/tmp/project"),
             workspace_root=Path("/tmp/workspace"),
-            test_framework="junit4",
-            test_framework_version="4.13.2",
         )
         item = FileWorkItem(
             file_path="src/main/java/com/example/LegacyService.java",
@@ -65,9 +65,12 @@ class WorkflowTests(unittest.TestCase):
             1,
             [],
             [],
+            GlobalCoverageSummary(covered_lines=10, missed_lines=5, coverage_percent=66.67, report_count=1),
+            Path("/tmp/workspace/artifacts/coverage-context.md"),
         )
-        self.assertIn("Testing stack: junit4 4.13.2", objective)
-        self.assertIn("Match the repository's testing framework and version.", objective)
+        self.assertNotIn("Testing stack:", objective)
+        self.assertNotIn("Match the repository's testing framework and version.", objective)
+        self.assertIn("Coverage context artifact:", objective)
 
 
 if __name__ == "__main__":

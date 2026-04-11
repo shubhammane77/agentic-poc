@@ -41,6 +41,7 @@ class MlflowSettings:
 @dataclass
 class AppConfig:
     repo_url: str = ""
+    repo_path: str = ""
     gitlab_base_url: str = ""
     gitlab_token: str = ""
     gitlab_username: str = "oauth2"
@@ -61,6 +62,7 @@ class AppConfig:
         load_dotenv()
         return cls(
             repo_url=os.getenv("REPO_URL", "").strip(),
+            repo_path=os.getenv("REPO_PATH", "").strip(),
             gitlab_base_url=os.getenv("GITLAB_BASE_URL", "").strip(),
             gitlab_token=os.getenv("GITLAB_TOKEN", "").strip(),
             gitlab_username=os.getenv("GITLAB_USERNAME", "oauth2").strip() or "oauth2",

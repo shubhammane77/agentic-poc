@@ -46,6 +46,7 @@ cp .env.example .env
 - optional `MAVEN_SETTINGS_XML`
 - optional `MAX_FILES_PER_RUN`
 - optional `REPO_URL` (used when `--repo-url` is omitted)
+- optional `REPO_PATH` (used when `--repo-path` is omitted)
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
 - `MODEL_API_KEY`
@@ -56,6 +57,18 @@ cp .env.example .env
 - `ENABLE_MLFLOW_TRACING`
 
 ## Run The Agent On A Git Repo
+
+For local repos (no clone), copy the local project into the run sandbox and execute there:
+
+```bash
+uv run testgen run --repo-path /absolute/path/to/local-maven-repo
+```
+
+You can also set `REPO_PATH` in `.env` and run:
+
+```bash
+uv run testgen run
+```
 
 The agent clones the target repo internally using:
 
@@ -148,6 +161,7 @@ uv run testgen eval --config examples/model_matrix.toml
 
 ```bash
 uv run testgen run --repo-url https://gitlab.example.com/group/project.git
+uv run testgen run --repo-path /absolute/path/to/local-maven-repo
 uv run testgen status --run-id <run_id>
 uv run testgen logs --run-id <run_id>
 uv run testgen pause --run-id <run_id>

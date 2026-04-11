@@ -1,4 +1,3 @@
-import tempfile
 import unittest
 from pathlib import Path
 
@@ -45,41 +44,6 @@ class CoverageAnalyzerTests(unittest.TestCase):
         self.assertEqual(5.0, comparison.percentage_increase)
         self.assertEqual(2, comparison.covered_line_increase)
         self.assertEqual(2, comparison.missed_line_reduction)
-
-    def test_detects_test_framework_and_version(self) -> None:
-        analyzer = CoverageAnalyzer(AppConfig())
-        framework, version = analyzer.detect_test_framework_info(FIXTURE_ROOT)
-        self.assertEqual("junit5", framework)
-        self.assertEqual("5.10.2", version)
-
-    def test_detects_junit4_from_pom_dependency(self) -> None:
-        analyzer = CoverageAnalyzer(AppConfig())
-        with tempfile.TemporaryDirectory() as tmpdir:
-            root = Path(tmpdir)
-            (root / "pom.xml").write_text(
-                "\n".join(
-                    [
-                        "<project xmlns=\"http://maven.apache.org/POM/4.0.0\">",
-                        "  <modelVersion>4.0.0</modelVersion>",
-                        "  <groupId>com.example</groupId>",
-                        "  <artifactId>legacy-app</artifactId>",
-                        "  <version>1.0.0</version>",
-                        "  <dependencies>",
-                        "    <dependency>",
-                        "      <groupId>junit</groupId>",
-                        "      <artifactId>junit</artifactId>",
-                        "      <version>4.13.2</version>",
-                        "      <scope>test</scope>",
-                        "    </dependency>",
-                        "  </dependencies>",
-                        "</project>",
-                    ]
-                ),
-                encoding="utf-8",
-            )
-            framework, version = analyzer.detect_test_framework_info(root)
-        self.assertEqual("junit4", framework)
-        self.assertEqual("4.13.2", version)
 
 
 if __name__ == "__main__":

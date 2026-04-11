@@ -27,17 +27,9 @@ class RepoContext:
     source_type: str = "gitlab"
     default_branch: str | None = None
     module_paths: list[str] = field(default_factory=list)
-    test_framework: str = "unknown"
-    test_framework_version: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return _jsonify(self)
-
-    @property
-    def testing_stack_display(self) -> str:
-        if self.test_framework_version:
-            return f"{self.test_framework} {self.test_framework_version}"
-        return self.test_framework
 
 
 @dataclass

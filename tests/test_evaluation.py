@@ -5,7 +5,7 @@ from pathlib import Path
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.config import AppConfig
+from agentic_testgen.config import AppConfig, MlflowSettings
 from agentic_testgen.evaluation import ModelMatrixEvaluator
 
 
@@ -16,6 +16,7 @@ class EvaluationTests(unittest.TestCase):
             config = AppConfig(
                 gitlab_token="dummy-token",
                 workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
             )
             results = ModelMatrixEvaluator(config).run(Path("examples/model_matrix.toml"))
             self.assertGreaterEqual(len(results), 1)

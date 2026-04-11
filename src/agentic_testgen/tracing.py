@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -51,6 +52,8 @@ class MlflowTracer:
     def configure(self) -> None:
         if not (self.mlflow and self.settings.enabled):
             return
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
+        os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "1")
         tracking_uri = self.settings.normalized_tracking_uri()
         self.mlflow.set_tracking_uri(tracking_uri)
         self.mlflow.set_experiment(self.settings.experiment_name)
@@ -75,10 +78,19 @@ class MlflowTracer:
         if not (self.mlflow and self.settings.enabled):
             yield None
             return
-        with self.mlflow.start_run(run_name=name):
-            if tags:
-                self.mlflow.set_tags(tags)
-            yield self.mlflow
+        try:
+            with self.mlflow.start_run(run_name=name):
+                if tags:
+                    self.mlflow.set_tags(tags)
+                yield self.mlflow
+        except Exception as exc:
+            self.logger.log_event(
+                "mlflow.run",
+                "skipped",
+                summary=f"MLflow run unavailable: {exc}",
+                details={"run_name": name},
+            )
+            yield None
 
     def log_params(self, params: dict[str, Any]) -> None:
         if not self.active:

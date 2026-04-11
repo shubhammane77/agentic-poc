@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -22,18 +21,6 @@ class CoverageAnalyzer:
             relative = pom.parent.relative_to(repo_root)
             modules.append(str(relative) if str(relative) != "." else ".")
         return sorted(set(modules))
-
-    def detect_test_framework_info(self, repo_root: Path) -> tuple[str, str]:
-        poms = [
-            pom
-            for pom in repo_root.rglob("pom.xml")
-            if ".git" not in pom.parts and "target" not in pom.parts
-        ]
-        for pom in sorted(poms, key=lambda item: (len(item.relative_to(repo_root).parts), str(item))):
-            framework, version = self._detect_test_framework_in_pom(pom)
-            if framework != "unknown":
-                return framework, version
-        return "unknown", ""
 
     def run_tests_with_coverage(
         self,
@@ -172,73 +159,6 @@ class CoverageAnalyzer:
             covered_line_increase=after.covered_lines - before.covered_lines,
             missed_line_reduction=before.missed_lines - after.missed_lines,
         )
-
-    def _detect_test_framework_in_pom(self, pom_path: Path) -> tuple[str, str]:
-        try:
-            root = ET.fromstring(pom_path.read_text(encoding="utf-8", errors="ignore"))
-        except ET.ParseError:
-            return "unknown", ""
-        namespace = self._pom_namespace(root)
-        properties = self._pom_properties(root, namespace)
-        dependencies = root.findall(f".//{self._pom_tag('dependency', namespace)}")
-        for dependency in dependencies:
-            group_id = self._dependency_text(dependency, "groupId", namespace).lower()
-            artifact_id = self._dependency_text(dependency, "artifactId", namespace).lower()
-            if not artifact_id:
-                continue
-            framework = self._classify_test_framework(group_id, artifact_id)
-            if framework == "unknown":
-                continue
-            version = self._resolve_property_references(
-                self._dependency_text(dependency, "version", namespace),
-                properties,
-            )
-            return framework, version
-        return "unknown", ""
-
-    def _pom_namespace(self, root: ET.Element) -> str:
-        if root.tag.startswith("{") and "}" in root.tag:
-            return root.tag[1:].split("}", 1)[0]
-        return ""
-
-    def _pom_tag(self, name: str, namespace: str) -> str:
-        return f"{{{namespace}}}{name}" if namespace else name
-
-    def _pom_properties(self, root: ET.Element, namespace: str) -> dict[str, str]:
-        properties: dict[str, str] = {}
-        properties_node = root.find(self._pom_tag("properties", namespace))
-        if properties_node is None:
-            return properties
-        for child in list(properties_node):
-            tag_name = child.tag.split("}", 1)[-1]
-            properties[tag_name] = (child.text or "").strip()
-        return properties
-
-    def _dependency_text(self, dependency: ET.Element, name: str, namespace: str) -> str:
-        node = dependency.find(self._pom_tag(name, namespace))
-        return (node.text or "").strip() if node is not None and node.text else ""
-
-    def _resolve_property_references(self, value: str, properties: dict[str, str]) -> str:
-        resolved = value.strip()
-        for _ in range(5):
-            match = re.fullmatch(r"\$\{([^}]+)\}", resolved)
-            if not match:
-                break
-            key = match.group(1)
-            next_value = properties.get(key, resolved)
-            if next_value == resolved:
-                break
-            resolved = next_value.strip()
-        return resolved
-
-    def _classify_test_framework(self, group_id: str, artifact_id: str) -> str:
-        if group_id == "org.junit.jupiter" or artifact_id.startswith("junit-jupiter"):
-            return "junit5"
-        if group_id == "junit" and artifact_id == "junit":
-            return "junit4"
-        if group_id == "org.testng" and artifact_id == "testng":
-            return "testng"
-        return "unknown"
 
 
 def summarize_tree(root: Path, max_depth: int = 4) -> str:

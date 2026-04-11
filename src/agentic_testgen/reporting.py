@@ -12,7 +12,7 @@ from agentic_testgen.models import (
     RepoContext,
     SubagentResult,
 )
-from agentic_testgen.utils import ensure_dir, write_json
+from agentic_testgen.utils import ensure_dir, read_json, write_json
 
 
 def _column_name(index: int) -> str:
@@ -114,17 +114,18 @@ class ReportWriter:
         coverage_comparison: CoverageComparison | None = None,
     ) -> Path:
         output = self.artifacts_dir / "results.xlsx"
+        coverage_context = read_json(self.artifacts_dir / "coverage-context.json", default={}) or {}
+        global_coverage = coverage_context.get("global_coverage", {})
+        context_files = coverage_context.get("file_coverage", [])
         sheets = {
             "runs": [
-                ["run_id", "repo_name", "repo_url", "clone_path", "source_type", "test_framework", "test_framework_version"],
+                ["run_id", "repo_name", "repo_url", "clone_path", "source_type"],
                 [
                     repo_context.run_id,
                     repo_context.repo_name,
                     repo_context.repo_url,
                     str(repo_context.clone_path),
                     repo_context.source_type,
-                    repo_context.test_framework,
-                    repo_context.test_framework_version or "unknown",
                 ],
             ],
             "files": [["file_path", "module", "coverage_before", "covered_lines", "missed_lines", "candidate_rank", "assigned_subagent", "status"]],
@@ -166,6 +167,15 @@ class ReportWriter:
                 "percentage_increase",
                 "covered_line_increase",
                 "missed_line_reduction",
+            ]],
+            "coverage_context": [[
+                "section",
+                "file_path",
+                "module",
+                "coverage_percent",
+                "covered_lines",
+                "missed_lines",
+                "report_count",
             ]],
         }
 
@@ -233,6 +243,29 @@ class ReportWriter:
                     coverage_comparison.missed_line_reduction,
                 ]
             )
+        sheets["coverage_context"].append(
+            [
+                "global_coverage",
+                "",
+                "",
+                global_coverage.get("coverage_percent", ""),
+                global_coverage.get("covered_lines", ""),
+                global_coverage.get("missed_lines", ""),
+                global_coverage.get("report_count", ""),
+            ]
+        )
+        for item in context_files:
+            sheets["coverage_context"].append(
+                [
+                    "file_coverage",
+                    item.get("file_path", ""),
+                    item.get("module", ""),
+                    item.get("coverage_percent", ""),
+                    item.get("covered_lines", ""),
+                    item.get("missed_lines", ""),
+                    "",
+                ]
+            )
 
         with ZipFile(output, "w", compression=ZIP_DEFLATED) as zf:
             zf.writestr(
@@ -250,6 +283,7 @@ class ReportWriter:
                 '<Override PartName="/xl/worksheets/sheet3.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet4.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 '<Override PartName="/xl/worksheets/sheet5.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+                '<Override PartName="/xl/worksheets/sheet6.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
                 "</Types>",
             )
             zf.writestr(
@@ -289,6 +323,7 @@ class ReportWriter:
                 '<sheet name="attempts" sheetId="3" r:id="rId3"/>'
                 '<sheet name="model_eval" sheetId="4" r:id="rId4"/>'
                 '<sheet name="coverage_summary" sheetId="5" r:id="rId5"/>'
+                '<sheet name="coverage_context" sheetId="6" r:id="rId6"/>'
                 "</sheets>"
                 "</workbook>",
             )
@@ -301,7 +336,8 @@ class ReportWriter:
                 '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet3.xml"/>'
                 '<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet4.xml"/>'
                 '<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet5.xml"/>'
-                '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
+                '<Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet6.xml"/>'
+                '<Relationship Id="rId7" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>'
                 "</Relationships>",
             )
             zf.writestr(
