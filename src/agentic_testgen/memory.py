@@ -20,7 +20,8 @@ class MemoryEntry:
     status: str
     attempt_count: int
     lesson: str
-    failure_summary: str
+    failure_cause: str
+    failure_analysis: str
     failure_feedback: list[str]
     generated_test_files: list[str]
 
@@ -34,7 +35,8 @@ class MemoryEntry:
             "status": self.status,
             "attempt_count": self.attempt_count,
             "lesson": self.lesson,
-            "failure_summary": self.failure_summary,
+            "failure_cause": self.failure_cause,
+            "failure_analysis": self.failure_analysis,
             "failure_feedback": self.failure_feedback,
             "generated_test_files": self.generated_test_files,
         }
@@ -140,7 +142,8 @@ class MemoryManager:
             status=result.status,
             attempt_count=len(result.attempts),
             lesson=self._lesson_text(result),
-            failure_summary=result.error_message[:4000],
+            failure_cause=self._infer_failure_cause(result),
+            failure_analysis=self._failure_analysis_text(result),
             failure_feedback=self._failure_feedback(result),
             generated_test_files=result.generated_test_files[:],
         ).to_json()
@@ -159,15 +162,44 @@ class MemoryManager:
             return []
         feedback: list[str] = []
         for attempt in result.attempts:
-            reason = (attempt.failure_summary or "").strip()
-            reflection = (attempt.reflective_summary or "").strip()
-            if reason:
-                feedback.append(f"Attempt {attempt.iteration} failure: {reason[:600]}")
-            if reflection:
-                feedback.append(f"Attempt {attempt.iteration} reflection: {reflection[:600]}")
-        if not feedback and result.error_message:
-            feedback.append(result.error_message[:600])
+            analysis = (attempt.failure_analysis or "").strip()
+            if analysis:
+                feedback.append(f"Attempt {attempt.iteration} analysis: {analysis[:600]}")
+        if not feedback:
+            fallback = self._failure_analysis_text(result)
+            if fallback:
+                feedback.append(fallback[:600])
         return feedback[:8]
+
+    def _failure_analysis_text(self, result: SubagentResult) -> str:
+        if result.status == "passed":
+            return ""
+        analyses = [attempt.failure_analysis.strip() for attempt in result.attempts if attempt.failure_analysis.strip()]
+        if analyses:
+            return "\n".join(analyses)[:4000]
+        return (result.final_summary or "").strip()[:4000]
+
+    def _infer_failure_cause(self, result: SubagentResult) -> str:
+        if result.status == "passed":
+            return "none"
+        latest = ""
+        if result.attempts:
+            latest = (result.attempts[-1].failure_summary or "").lower()
+        analysis = self._failure_analysis_text(result).lower()
+        text = f"{latest}\n{analysis}"
+        if "compilation failure" in text or "cannot find symbol" in text or "package " in text and " does not exist" in text:
+            return "compile_error"
+        if "assertion" in text or "expected:" in text or "but was:" in text:
+            return "assertion_mismatch"
+        if "junit.jupiter" in text and "org.junit" in text:
+            return "wrong_test_framework_usage"
+        if "no tests were executed" in text or "no tests found" in text:
+            return "test_discovery_error"
+        if "timed out" in text or "timeout" in text:
+            return "timeout"
+        if "dependency" in text and "failed" in text:
+            return "dependency_error"
+        return "unknown"
 
     def _merge_entry(self, entries: list[dict[str, Any]], entry: dict[str, Any]) -> list[dict[str, Any]]:
         filtered = [

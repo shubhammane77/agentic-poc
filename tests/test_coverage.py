@@ -5,7 +5,7 @@ import tests._path_setup  # noqa: F401
 
 from agentic_testgen.config import AppConfig
 from agentic_testgen.coverage import CoverageAnalyzer
-from agentic_testgen.models import GlobalCoverageSummary
+from agentic_testgen.models import CoverageRecord, GlobalCoverageSummary
 
 
 FIXTURE_ROOT = Path("tests/fixtures/repos/simple-service")
@@ -20,13 +20,39 @@ class CoverageAnalyzerTests(unittest.TestCase):
         self.assertEqual("src/main/java/com/example/Calculator.java", record.file_path)
         self.assertGreater(record.missed_lines, 0)
 
-    def test_builds_ranked_work_items(self) -> None:
+    def test_builds_work_items(self) -> None:
         analyzer = CoverageAnalyzer(AppConfig())
         records = analyzer.collect_reports(FIXTURE_ROOT)
         items = analyzer.build_work_items(records)
         self.assertEqual(1, len(items))
         self.assertEqual(1, items[0].priority_rank)
         self.assertEqual("src/main/java/com/example/Calculator.java", items[0].file_path)
+
+    def test_build_work_items_preserves_input_order(self) -> None:
+        analyzer = CoverageAnalyzer(AppConfig())
+        records = [
+            CoverageRecord(
+                file_path="src/main/java/com/example/ZetaService.java",
+                module=".",
+                covered_lines=10,
+                missed_lines=1,
+                coverage_percent=90.0,
+            ),
+            CoverageRecord(
+                file_path="src/main/java/com/example/AlphaModel.java",
+                module=".",
+                covered_lines=1,
+                missed_lines=9,
+                coverage_percent=10.0,
+            ),
+        ]
+
+        items = analyzer.build_work_items(records)
+
+        self.assertEqual(
+            ["src/main/java/com/example/ZetaService.java", "src/main/java/com/example/AlphaModel.java"],
+            [item.file_path for item in items],
+        )
 
     def test_summarizes_and_compares_global_coverage(self) -> None:
         analyzer = CoverageAnalyzer(AppConfig())

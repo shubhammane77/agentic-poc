@@ -100,6 +100,7 @@ class AttemptRecord:
     status: str
     failure_summary: str
     reflective_summary: str
+    failure_analysis: str = ""
 
     def to_json(self) -> dict[str, Any]:
         return _jsonify(self)

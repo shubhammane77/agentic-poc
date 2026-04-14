@@ -194,6 +194,7 @@ class ReportWriter:
                 "status",
                 "failure_summary",
                 "reflective_summary",
+                "failure_analysis",
             ]],
             "model_eval": [[
                 "case_id",
@@ -271,6 +272,7 @@ class ReportWriter:
                     attempt.status,
                     attempt.failure_summary,
                     attempt.reflective_summary,
+                    attempt.failure_analysis,
                 ]
             )
 

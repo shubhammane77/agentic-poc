@@ -90,6 +90,12 @@ def int_from_env(value: str | None, default: int) -> int:
     return int(value)
 
 
+def float_from_env(value: str | None, default: float) -> float:
+    if value is None or not value.strip():
+        return default
+    return float(value)
+
+
 def tail_lines(path: Path, limit: int = 50) -> list[str]:
     if not path.exists():
         return []

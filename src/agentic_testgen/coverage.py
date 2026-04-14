@@ -54,7 +54,7 @@ class CoverageAnalyzer:
         deduped: dict[str, CoverageRecord] = {}
         for record in records:
             deduped[record.file_path] = record
-        return sorted(deduped.values(), key=lambda item: (item.coverage_percent, -item.missed_lines, item.file_path))
+        return list(deduped.values())
 
     def parse_jacoco_xml(self, report_path: Path, repo_root: Path) -> list[CoverageRecord]:
         if not report_path.exists():
@@ -117,10 +117,7 @@ class CoverageAnalyzer:
             for record in coverage_records
             if record.missed_lines > 0 and "/src/test/" not in record.file_path.replace("\\", "/")
         ]
-        for rank, record in enumerate(
-            sorted(filtered, key=lambda item: (item.coverage_percent, -item.missed_lines, item.file_path)),
-            start=1,
-        ):
+        for rank, record in enumerate(filtered, start=1):
             items.append(
                 FileWorkItem(
                     file_path=record.file_path,

@@ -126,6 +126,23 @@ class DSPyRuntime:
             self.logger.log_event("dspy.reflect", "failed", summary=str(exc))
             return latest_output or prior_failures or str(exc)
 
+    def analyze_failure(self, file_path: str, iteration: int, failure_output: str) -> str:
+        if not self.enabled:
+            snippet = (failure_output or "No failure output provided.").strip()
+            return snippet[:1000]
+        try:
+            program = dspy.Predict("file_path, iteration, failure_output -> concise_failure_analysis")
+            result = program(
+                file_path=file_path,
+                iteration=str(iteration),
+                failure_output=failure_output[:8000],
+            )
+            return getattr(result, "concise_failure_analysis", str(result))[:2000]
+        except Exception as exc:
+            self.logger.log_event("dspy.failure_analysis", "failed", summary=str(exc))
+            snippet = (failure_output or str(exc)).strip()
+            return snippet[:1000]
+
 
 class DaddySubagentsReflectiveWorkflow:
     def __init__(self, config: AppConfig):
@@ -872,6 +889,7 @@ class DaddySubagentsReflectiveWorkflow:
             tool_summary = ""
             validation_output = ""
             status = "failed"
+            failure_analysis = ""
             with logger.step(
                 "subagent.iteration",
                 subagent_id=subagent_id,
@@ -917,6 +935,7 @@ class DaddySubagentsReflectiveWorkflow:
                     status = "passed" if tool_context.last_single_test_exit_code == 0 else "failed"
                 else:
                     validation_output = "No test file was generated."
+                    status = "failed"
                 tool_summary = json.dumps(trajectory, default=str)[:4000]
                 reflective_summary = runtime.reflect(objective, validation_output, "\n".join(prior_failures))
                 tracer.tag_last_trace(
@@ -929,6 +948,20 @@ class DaddySubagentsReflectiveWorkflow:
                         "file_path": item.file_path,
                     }
                 )
+                if status != "passed":
+                    failure_analysis = runtime.analyze_failure(item.file_path, iteration, validation_output)
+                    tracer.tag_last_trace(
+                        {
+                            "run_id": repo_context.run_id,
+                            "workflow": "daddy_subagents_reflective",
+                            "dspy_call": "subagent.failure_analyst",
+                            "subagent_id": subagent_id,
+                            "iteration": str(iteration),
+                            "file_path": item.file_path,
+                        }
+                    )
+                else:
+                    failure_analysis = ""
                 attempt = AttemptRecord(
                     run_id=repo_context.run_id,
                     subagent_id=subagent_id,
@@ -948,6 +981,7 @@ class DaddySubagentsReflectiveWorkflow:
                     status=status,
                     failure_summary="" if status == "passed" else validation_output[:4000],
                     reflective_summary=reflective_summary[:4000],
+                    failure_analysis=failure_analysis[:2000] if failure_analysis else "",
                 )
                 attempts.append(attempt)
                 item.status = status
@@ -956,6 +990,7 @@ class DaddySubagentsReflectiveWorkflow:
                 step["generated_test_file"] = generated_file or ""
                 step["failure_feedback"] = attempt.failure_summary[:800]
                 step["reflective_summary"] = attempt.reflective_summary[:800]
+                step["failure_analysis"] = attempt.failure_analysis[:800]
                 logger.log_event(
                     "subagent.feedback",
                     "completed",
@@ -967,6 +1002,7 @@ class DaddySubagentsReflectiveWorkflow:
                         "generated_test_file": generated_file or "",
                         "failure_feedback": attempt.failure_summary[:1500],
                         "reflective_summary": attempt.reflective_summary[:1500],
+                        "failure_analysis": attempt.failure_analysis[:1500],
                         "single_test_command": attempt.single_test_command,
                     },
                 )
@@ -1002,6 +1038,7 @@ class DaddySubagentsReflectiveWorkflow:
                     "attempt_count": len(attempts),
                     "last_failure_feedback": (attempts[-1].failure_summary[:1500] if attempts else ""),
                     "last_reflective_summary": (attempts[-1].reflective_summary[:1500] if attempts else ""),
+                    "last_failure_analysis": (attempts[-1].failure_analysis[:1500] if attempts else ""),
                 },
             )
         if commit_hash:
