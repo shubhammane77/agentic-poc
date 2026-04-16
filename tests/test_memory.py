@@ -45,12 +45,20 @@ class MemoryTests(unittest.TestCase):
             run_memory = read_json(memory_path, default={})
             global_memory = read_json(global_memory_path, default={})
 
-            self.assertGreaterEqual(len(run_memory.get("failures", [])), 1)
-            self.assertGreaterEqual(len(run_memory.get("failures", [])[0].get("failure_feedback", [])), 1)
+            self.assertGreaterEqual(len(run_memory.get("entries", [])), 1)
+            failed_entries = [entry for entry in run_memory.get("entries", []) if entry.get("status") != "passed"]
+            self.assertGreaterEqual(len(failed_entries), 1)
+            self.assertGreaterEqual(len(failed_entries[0].get("failure_feedback", [])), 1)
             self.assertIn("repos", global_memory)
             repo_entries = list(global_memory["repos"].values())
             self.assertEqual(1, len(repo_entries))
-            self.assertGreaterEqual(len(repo_entries[0].get("failures", [])), 1)
+            failed_lessons = [
+                item.get("lesson")
+                for item in repo_entries[0].get("lessons", [])
+                if item.get("status") == "failed"
+            ]
+            self.assertGreaterEqual(len(failed_lessons), 1)
+            self.assertTrue(all(isinstance(item, str) for item in failed_lessons))
 
 
 if __name__ == "__main__":

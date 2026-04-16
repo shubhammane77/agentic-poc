@@ -6,7 +6,7 @@ import tests._path_setup  # noqa: F401
 
 from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
 from agentic_testgen.config import AppConfig, MlflowSettings
-from agentic_testgen.models import CoverageRecord, FileWorkItem, GlobalCoverageSummary, RepoContext
+from agentic_testgen.models import CoverageRecord, FileWorkItem, RepoContext
 from agentic_testgen.utils import CommandResult
 
 
@@ -80,12 +80,14 @@ class WorkflowTests(unittest.TestCase):
             1,
             [],
             [],
-            GlobalCoverageSummary(covered_lines=10, missed_lines=5, coverage_percent=66.67, report_count=1),
             Path("/tmp/workspace/artifacts/coverage-context.md"),
+            ["if (input == null) {", "return repository.findById(id);"],
         )
         self.assertNotIn("Testing stack:", objective)
         self.assertNotIn("Match the repository's testing framework and version.", objective)
         self.assertIn("Coverage context artifact:", objective)
+        self.assertIn("Uncovered code snippets in assigned file:", objective)
+        self.assertIn("if (input == null) {", objective)
 
 
 if __name__ == "__main__":

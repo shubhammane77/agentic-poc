@@ -64,15 +64,13 @@ class MemoryManager:
                     "updated_at": utc_timestamp(),
                 }
             )
-            payload.setdefault("successes", [])
-            payload.setdefault("failures", [])
+            payload["entries"] = self._combined_entries(payload)
         write_json(run_memory_path, payload)
 
     def record_result(self, run_memory_path: Path, repo_context: RepoContext, item: FileWorkItem, result: SubagentResult) -> None:
         entry = self._entry_from_result(repo_context, item, result)
         run_payload = read_json(run_memory_path, default=self._new_run_memory(repo_context))
-        bucket_name = "successes" if result.status == "passed" else "failures"
-        run_payload[bucket_name] = self._merge_entry(run_payload.get(bucket_name, []), entry)
+        run_payload["entries"] = self._merge_entry(self._combined_entries(run_payload), entry)
         run_payload["updated_at"] = utc_timestamp()
         write_json(run_memory_path, run_payload)
 
@@ -82,17 +80,10 @@ class MemoryManager:
         repo_memory = repos.setdefault(
             repo_key,
             {
-                "repo_name": repo_context.repo_name,
-                "repo_url": repo_context.repo_url,
-                "successes": [],
-                "failures": [],
-                "updated_at": utc_timestamp(),
+                "lessons": [],
             },
         )
-        repo_memory["repo_name"] = repo_context.repo_name
-        repo_memory["repo_url"] = repo_context.repo_url
-        repo_memory[bucket_name] = self._merge_entry(repo_memory.get(bucket_name, []), entry)
-        repo_memory["updated_at"] = utc_timestamp()
+        repo_memory["lessons"] = self._merge_repo_lesson(repo_memory, result.status, entry["lesson"])
         write_json(self.global_memory_path, global_payload)
 
     def lessons_for_item(self, run_memory_path: Path, repo_context: RepoContext, item: FileWorkItem, *, limit: int = 4) -> list[str]:
@@ -100,22 +91,31 @@ class MemoryManager:
         global_payload = read_json(self.global_memory_path, default={"repos": {}})
         repo_payload = global_payload.get("repos", {}).get(self._repo_key(repo_context), {})
 
-        successes = self._rank_entries(
-            [*run_payload.get("successes", []), *repo_payload.get("successes", [])],
-            repo_context,
-            item,
-        )
-        failures = self._rank_entries(
-            [*run_payload.get("failures", []), *repo_payload.get("failures", [])],
-            repo_context,
-            item,
-        )
+        ranked_entries = self._rank_entries(self._combined_entries(run_payload), repo_context, item)
+        successes = [entry for entry in ranked_entries if entry.get("status") == "passed"]
+        failures = [entry for entry in ranked_entries if entry.get("status") != "passed"]
+        repo_lessons = repo_payload.get("lessons", [])
+        if not repo_lessons:
+            # Backward compatibility for older global memory format.
+            repo_lessons = [
+                {"status": "passed", "lesson": lesson}
+                for lesson in repo_payload.get("success_lessons", [])
+            ] + [
+                {"status": "failed", "lesson": lesson}
+                for lesson in repo_payload.get("failure_lessons", [])
+            ]
+        success_lessons = [entry.get("lesson", "") for entry in repo_lessons if entry.get("status") == "passed"]
+        failure_lessons = [entry.get("lesson", "") for entry in repo_lessons if entry.get("status") != "passed"]
 
         lessons: list[str] = []
         for entry in successes[:2]:
             lessons.append(f"Success pattern from {entry['file_path']}: {entry['lesson']}")
+        for lesson in success_lessons[:2]:
+            lessons.append(f"Success pattern: {lesson}")
         for entry in failures[:2]:
             lessons.append(f"Avoid failure from {entry['file_path']}: {entry['lesson']}")
+        for lesson in failure_lessons[:2]:
+            lessons.append(f"Avoid failure: {lesson}")
         return lessons[:limit]
 
     def _new_run_memory(self, repo_context: RepoContext) -> dict[str, Any]:
@@ -125,8 +125,7 @@ class MemoryManager:
             "repo_url": repo_context.repo_url,
             "repo_key": self._repo_key(repo_context),
             "updated_at": utc_timestamp(),
-            "successes": [],
-            "failures": [],
+            "entries": [],
         }
 
     def _repo_key(self, repo_context: RepoContext) -> str:
@@ -213,6 +212,33 @@ class MemoryManager:
         ]
         filtered.insert(0, entry)
         return filtered[:MAX_MEMORY_ENTRIES]
+
+    def _merge_repo_lesson(self, repo_memory: dict[str, Any], status: str, lesson: str) -> list[dict[str, str]]:
+        lessons = repo_memory.get("lessons", [])
+        if not lessons:
+            # Backward compatibility for older global memory format.
+            lessons = [
+                {"status": "passed", "lesson": item}
+                for item in repo_memory.get("success_lessons", [])
+            ] + [
+                {"status": "failed", "lesson": item}
+                for item in repo_memory.get("failure_lessons", [])
+            ]
+        target_status = "passed" if status == "passed" else "failed"
+        filtered = [
+            item
+            for item in lessons
+            if not (item.get("status") == target_status and item.get("lesson") == lesson)
+        ]
+        filtered.insert(0, {"status": target_status, "lesson": lesson})
+        return filtered[:MAX_MEMORY_ENTRIES]
+
+    def _combined_entries(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        entries = payload.get("entries", [])
+        if entries:
+            return entries
+        # Backward compatibility for older run memory format.
+        return payload.get("successes", []) + payload.get("failures", [])
 
     def _rank_entries(
         self,

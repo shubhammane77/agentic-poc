@@ -128,20 +128,34 @@ class DSPyRuntime:
 
     def analyze_failure(self, file_path: str, iteration: int, failure_output: str) -> str:
         if not self.enabled:
-            snippet = (failure_output or "No failure output provided.").strip()
-            return snippet[:1000]
+            output = failure_output or "No failure output provided."
+            return self._limit_words(output, 500)
         try:
-            program = dspy.Predict("file_path, iteration, failure_output -> concise_failure_analysis")
+            program = dspy.Predict(
+                "file_path, iteration, failure_output, answer_style -> concise_failure_analysis"
+            )
             result = program(
                 file_path=file_path,
                 iteration=str(iteration),
                 failure_output=failure_output[:8000],
+                answer_style=(
+                    "Summarize only the root cause context from this stack/output. "
+                    "Do not include full failure history, repeated logs, or step-by-step timeline. "
+                    "Maximum 500 words."
+                ),
             )
-            return getattr(result, "concise_failure_analysis", str(result))[:2000]
+            analysis = getattr(result, "concise_failure_analysis", str(result))
+            return self._limit_words(analysis, 500)
         except Exception as exc:
             self.logger.log_event("dspy.failure_analysis", "failed", summary=str(exc))
-            snippet = (failure_output or str(exc)).strip()
-            return snippet[:1000]
+            output = failure_output or str(exc)
+            return self._limit_words(output, 500)
+
+    def _limit_words(self, text: str, limit: int) -> str:
+        words = text.split()
+        if len(words) <= limit:
+            return text
+        return " ".join(words[:limit])
 
 
 class DaddySubagentsReflectiveWorkflow:
@@ -281,7 +295,6 @@ class DaddySubagentsReflectiveWorkflow:
                 work_items,
                 results,
                 checkpoint_store,
-                baseline_summary,
                 coverage_context_path,
             )
             results.extend(new_results)
@@ -469,7 +482,6 @@ class DaddySubagentsReflectiveWorkflow:
             work_items,
             [],
             checkpoint_store,
-            baseline_summary,
             coverage_context_markdown_path,
         )
         attempts = self._attempts_from_results(subagent_results)
@@ -553,7 +565,6 @@ class DaddySubagentsReflectiveWorkflow:
         work_items: list[FileWorkItem],
         existing_results: list[SubagentResult],
         checkpoint_store: CheckpointStore,
-        baseline_summary: GlobalCoverageSummary,
         coverage_context_path: Path,
     ) -> list[SubagentResult]:
         results: list[SubagentResult] = []
@@ -579,7 +590,6 @@ class DaddySubagentsReflectiveWorkflow:
                     tracer,
                     item,
                     checkpoint_store,
-                    baseline_summary,
                     coverage_context_path,
                 )
                 in_flight[future] = item
@@ -610,7 +620,6 @@ class DaddySubagentsReflectiveWorkflow:
                             tracer,
                             next_item,
                             checkpoint_store,
-                            baseline_summary,
                             coverage_context_path,
                         )
                         in_flight[next_future] = next_item
@@ -829,7 +838,6 @@ class DaddySubagentsReflectiveWorkflow:
         tracer: MlflowTracer,
         item: FileWorkItem,
         checkpoint_store: CheckpointStore,
-        baseline_summary: GlobalCoverageSummary,
         coverage_context_path: Path,
     ) -> SubagentResult:
         subagent_id = item.assigned_subagent_id or new_run_id("subagent")
@@ -873,6 +881,7 @@ class DaddySubagentsReflectiveWorkflow:
 
         prior_failures: list[str] = []
         memory_insights = self.memory.lessons_for_item(self._run_memory_path(workspace), repo_context, item)
+        missed_code_snippets = self._missed_code_snippets(repo_context.clone_path, item)
         for iteration in range(1, self.config.max_subagent_iterations + 1):
             suggested_test_path = self._suggest_test_path(worktree_path, item.file_path, iteration)
             objective = self._subagent_objective(
@@ -882,8 +891,8 @@ class DaddySubagentsReflectiveWorkflow:
                 iteration,
                 prior_failures,
                 memory_insights,
-                baseline_summary,
                 coverage_context_path,
+                missed_code_snippets,
             )
             generated_file = ""
             tool_summary = ""
@@ -962,6 +971,9 @@ class DaddySubagentsReflectiveWorkflow:
                     )
                 else:
                     failure_analysis = ""
+                failure_memory = failure_analysis or (
+                    validation_output.splitlines()[0] if validation_output else "Failure cause unavailable."
+                )
                 attempt = AttemptRecord(
                     run_id=repo_context.run_id,
                     subagent_id=subagent_id,
@@ -979,9 +991,9 @@ class DaddySubagentsReflectiveWorkflow:
                         )
                     ),
                     status=status,
-                    failure_summary="" if status == "passed" else validation_output[:4000],
+                    failure_summary="" if status == "passed" else failure_memory,
                     reflective_summary=reflective_summary[:4000],
-                    failure_analysis=failure_analysis[:2000] if failure_analysis else "",
+                    failure_analysis=failure_analysis,
                 )
                 attempts.append(attempt)
                 item.status = status
@@ -1024,7 +1036,7 @@ class DaddySubagentsReflectiveWorkflow:
                     )
                     final_summary = reflective_summary
                     break
-                prior_failures.append(reflective_summary)
+                prior_failures.append(failure_memory)
                 if self._pause_requested(workspace):
                     break
         if not commit_hash:
@@ -1062,7 +1074,9 @@ class DaddySubagentsReflectiveWorkflow:
                     integration_status = "integration_failed"
             self._append_integration(workspace, decision)
         if not final_summary:
-            latest_output = attempts[-1].failure_summary if attempts else "No attempts executed."
+            latest_output = attempts[-1].failure_analysis if attempts and attempts[-1].failure_analysis else (
+                attempts[-1].failure_summary if attempts else "No attempts executed."
+            )
             final_summary = runtime.reflect("final summary", latest_output, "\n".join(prior_failures))
         return SubagentResult(
             subagent_id=subagent_id,
@@ -1110,11 +1124,12 @@ class DaddySubagentsReflectiveWorkflow:
         iteration: int,
         prior_failures: list[str],
         memory_insights: list[str],
-        baseline_summary: GlobalCoverageSummary,
         coverage_context_path: Path,
+        missed_code_snippets: list[str],
     ) -> str:
         failure_text = "\n".join(f"- {failure}" for failure in prior_failures[-3:])
         memory_text = "\n".join(f"- {insight}" for insight in memory_insights[:4])
+        missed_code_text = "\n".join(f"- {snippet}" for snippet in missed_code_snippets[:10])
         return (
             "You are a Java unit-test generation subagent working inside a Git worktree.\n"
             "Write fresh, meaningful behavior-driven tests only for the assigned source file.\n"
@@ -1128,14 +1143,36 @@ class DaddySubagentsReflectiveWorkflow:
             "- Run the single test after writing.\n"
             f"Assigned file: {item.file_path}\n"
             f"Coverage context artifact: {coverage_context_path}\n"
-            f"Global coverage baseline: {baseline_summary.coverage_percent}% "
-            f"(covered={baseline_summary.covered_lines}, missed={baseline_summary.missed_lines})\n"
             f"Current file coverage: {item.coverage_percent}%\n"
+            f"Uncovered code snippets in assigned file:\n{missed_code_text or '- none available'}\n"
+            "Target methods and branches represented by these uncovered snippets first.\n"
             f"Shared memory:\n{memory_text or '- none yet'}\n"
             f"Suggested test path: {suggested_test_path}\n"
             f"Iteration: {iteration}\n"
-            f"Prior failures:\n{failure_text or '- none'}"
+            f"Prior failure context (why):\n{failure_text or '- none'}"
         )
+
+    def _missed_code_snippets(self, repo_root: Path, item: FileWorkItem, *, limit: int = 20) -> list[str]:
+        source_path = (repo_root / item.file_path).resolve()
+        try:
+            lines = source_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return []
+
+        snippets: list[str] = []
+        seen: set[str] = set()
+        for line_number in item.missed_line_numbers:
+            if line_number < 1 or line_number > len(lines):
+                continue
+            snippet = lines[line_number - 1].strip()
+            if not snippet:
+                continue
+            if snippet not in seen:
+                snippets.append(snippet[:300])
+                seen.add(snippet)
+            if len(snippets) >= limit:
+                break
+        return snippets
 
     def _run_memory_path(self, workspace: RunWorkspace) -> Path:
         return workspace.artifacts_dir / "memory.json"
