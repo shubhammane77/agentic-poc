@@ -58,15 +58,18 @@ class DSPyRuntime:
             return
         api_key = ""
         api_base = ""
+        temperature=0
         if self.model_override:
             import os
 
             api_key = os.getenv(self.model_override.api_key_env, "")
             api_base = self.model_override.api_base or ""
+            temperature =  self.config.model.temperature
             self.model_id = self.model_override.model_id
         else:
             api_key = self.config.model.api_key
             api_base = self.config.model.api_base
+            temperature =  self.config.model.temperature
             self.model_id = model_name
 
         final_model = model_name
@@ -78,6 +81,8 @@ class DSPyRuntime:
                 kwargs["api_key"] = api_key
             if api_base:
                 kwargs["api_base"] = api_base
+            if temperature:
+                kwargs["temperature"] = temperature   
             lm = dspy.LM(final_model, **kwargs)
             dspy.configure(lm=lm)
             self.enabled = True

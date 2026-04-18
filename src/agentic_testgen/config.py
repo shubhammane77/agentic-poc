@@ -83,6 +83,7 @@ class AppConfig:
                 model_name=os.getenv("MODEL_NAME", "").strip(),
                 api_key=os.getenv("MODEL_API_KEY", "").strip(),
                 api_base=os.getenv("MODEL_API_BASE", "").strip(),
+                temperature=os.getenv("TEMPERATURE", "").strip(),
             ),
             mlflow=MlflowSettings(
                 tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000").strip(),
