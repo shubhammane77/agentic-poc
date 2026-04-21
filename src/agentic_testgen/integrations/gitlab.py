@@ -3,9 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.utils import CommandResult, run_command
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.core.utils import CommandResult, run_command
 
 
 def sanitize_repo_url(repo_url: str) -> str:

@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from agentic_testgen.checkpointing import CheckpointStore
-from agentic_testgen.coverage import CoverageAnalyzer
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.models import CoverageComparison, CoverageRecord, GlobalCoverageSummary, RepoContext
-from agentic_testgen.reporting import ReportWriter
-from agentic_testgen.workspace import RunWorkspace
+from agentic_testgen.execution.checkpointing import CheckpointStore
+from agentic_testgen.analysis.coverage import CoverageAnalyzer
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.core.models import CoverageComparison, CoverageRecord, GlobalCoverageSummary, RepoContext
+from agentic_testgen.analysis.reporting import ReportWriter
+from agentic_testgen.execution.workspace import RunWorkspace
 
 
 class CoverageComparator:

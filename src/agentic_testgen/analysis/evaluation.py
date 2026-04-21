@@ -6,11 +6,11 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig
-from agentic_testgen.models import ModelDefinition, ModelEvalCase, ModelEvalResult, RepoContext
-from agentic_testgen.reporting import ReportWriter
-from agentic_testgen.utils import new_run_id, write_json
+from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.core.models import ModelDefinition, ModelEvalCase, ModelEvalResult, RepoContext
+from agentic_testgen.analysis.reporting import ReportWriter
+from agentic_testgen.core.utils import new_run_id, write_json
 
 
 @dataclass

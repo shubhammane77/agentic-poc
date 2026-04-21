@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-import json
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
 
 try:
     import dspy
 except ImportError:  # pragma: no cover - optional runtime dependency
     dspy = None  # type: ignore[assignment]
 
-from agentic_testgen.checkpointing import CheckpointStore
-from agentic_testgen.config import AppConfig
-from agentic_testgen.coverage import CoverageAnalyzer, summarize_tree
-from agentic_testgen.gitlab import GitLabRepositoryManager
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.memory import MemoryManager
-from agentic_testgen.models import (
+from agentic_testgen.execution.checkpointing import CheckpointStore
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.analysis.coverage import CoverageAnalyzer, summarize_tree
+from agentic_testgen.analysis.coverage_comparison import CoverageComparator
+from agentic_testgen.agents.dspy_runtime import DSPyRuntime
+from agentic_testgen.integrations.gitlab import GitLabRepositoryManager
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.execution.memory import MemoryManager
+from agentic_testgen.core.models import (
     AttemptRecord,
     CoverageComparison,
     CoverageRecord,
@@ -29,138 +28,12 @@ from agentic_testgen.models import (
     SubagentResult,
     WorkflowRunResult,
 )
-from agentic_testgen.reporting import ReportWriter
-from agentic_testgen.tools import SafeToolset, ToolContext
-from agentic_testgen.tracing import MlflowTracer
-from agentic_testgen.utils import new_run_id, prompt_hash, slugify, utc_timestamp, write_json
-from agentic_testgen.workspace import RunWorkspace, WorkspaceManager
-
-
-PROMPT_VERSION = "daddy_subagents_reflective_v1"
-
-
-class DSPyRuntime:
-    def __init__(self, config: AppConfig, logger: RunLogger, model_override: ModelDefinition | None = None):
-        self.config = config
-        self.logger = logger
-        self.model_override = model_override
-        self.enabled = False
-        self.model_id = "unconfigured"
-        self._configure()
-
-    def _configure(self) -> None:
-        if dspy is None:
-            self.logger.log_event("dspy.configure", "skipped", summary="DSPy not installed")
-            return
-        model_name = self.model_override.model_name if self.model_override else self.config.model.model_name
-        if not model_name:
-            self.logger.log_event("dspy.configure", "skipped", summary="No model configured")
-            return
-        api_key = ""
-        api_base = ""
-        temperature=0
-        if self.model_override:
-            import os
-
-            api_key = os.getenv(self.model_override.api_key_env, "")
-            api_base = self.model_override.api_base or ""
-            temperature =  self.config.model.temperature
-            self.model_id = self.model_override.model_id
-        else:
-            api_key = self.config.model.api_key
-            api_base = self.config.model.api_base
-            temperature =  self.config.model.temperature
-            self.model_id = model_name
-
-        final_model = model_name
-        if "/" not in final_model and self.config.model.provider:
-            final_model = f"{self.config.model.provider}/{final_model}"
-        try:
-            kwargs: dict[str, Any] = {}
-            if api_key:
-                kwargs["api_key"] = api_key
-            if api_base:
-                kwargs["api_base"] = api_base
-            if temperature:
-                kwargs["temperature"] = temperature   
-            lm = dspy.LM(final_model, **kwargs)
-            dspy.configure(lm=lm)
-            self.enabled = True
-            self.logger.log_event("dspy.configure", "completed", summary=f"Configured {self.model_id}")
-        except Exception as exc:
-            self.logger.log_event("dspy.configure", "failed", summary=str(exc))
-
-    def overview(
-        self,
-        repo_tree: str,
-        module_paths: list[str],
-    ) -> str:
-        if not self.enabled:
-            return (
-                "# Repository Overview\n\n"
-                f"- Modules: {', '.join(module_paths) if module_paths else '(none detected)'}\n\n"
-                "## Tree\n\n```text\n"
-                f"{repo_tree}\n```"
-            )
-        try:
-            program = dspy.ChainOfThought("repo_tree, module_paths -> overview_markdown")
-            result = program(
-                repo_tree=repo_tree,
-                module_paths=", ".join(module_paths),
-            )
-            return getattr(result, "overview_markdown", str(result))
-        except Exception as exc:
-            self.logger.log_event("dspy.overview", "failed", summary=str(exc))
-            return (
-                "# Repository Overview\n\n"
-                f"- Modules: {', '.join(module_paths) if module_paths else '(none detected)'}\n"
-            )
-
-    def reflect(self, objective: str, latest_output: str, prior_failures: str) -> str:
-        if not self.enabled:
-            return latest_output or prior_failures or "No reflection available."
-        try:
-            program = dspy.Predict("objective, latest_output, prior_failures -> summary")
-            result = program(
-                objective=objective,
-                latest_output=latest_output[:8000],
-                prior_failures=prior_failures[:8000],
-            )
-            return getattr(result, "summary", str(result))
-        except Exception as exc:
-            self.logger.log_event("dspy.reflect", "failed", summary=str(exc))
-            return latest_output or prior_failures or str(exc)
-
-    def analyze_failure(self, file_path: str, iteration: int, failure_output: str) -> str:
-        if not self.enabled:
-            output = failure_output or "No failure output provided."
-            return self._limit_words(output, 500)
-        try:
-            program = dspy.Predict(
-                "file_path, iteration, failure_output, answer_style -> concise_failure_analysis"
-            )
-            result = program(
-                file_path=file_path,
-                iteration=str(iteration),
-                failure_output=failure_output[:8000],
-                answer_style=(
-                    "Summarize only the root cause context from this stack/output. "
-                    "Do not include full failure history, repeated logs, or step-by-step timeline. "
-                    "Maximum 500 words."
-                ),
-            )
-            analysis = getattr(result, "concise_failure_analysis", str(result))
-            return self._limit_words(analysis, 500)
-        except Exception as exc:
-            self.logger.log_event("dspy.failure_analysis", "failed", summary=str(exc))
-            output = failure_output or str(exc)
-            return self._limit_words(output, 500)
-
-    def _limit_words(self, text: str, limit: int) -> str:
-        words = text.split()
-        if len(words) <= limit:
-            return text
-        return " ".join(words[:limit])
+from agentic_testgen.analysis.reporting import ReportWriter
+from agentic_testgen.agents.subagent_dispatcher import SubagentDispatcher
+from agentic_testgen.execution.tools import SafeToolset, ToolContext
+from agentic_testgen.integrations.tracing import MlflowTracer
+from agentic_testgen.core.utils import new_run_id, slugify, utc_timestamp, write_json
+from agentic_testgen.execution.workspace import RunWorkspace, WorkspaceManager
 
 
 class DaddySubagentsReflectiveWorkflow:
@@ -169,6 +42,8 @@ class DaddySubagentsReflectiveWorkflow:
         self.workspace_manager = WorkspaceManager(config.workspace_root)
         self.coverage = CoverageAnalyzer(config)
         self.memory = MemoryManager(config.workspace_root)
+        self._dispatcher = SubagentDispatcher(config, self.memory, self.coverage)
+        self._comparator = CoverageComparator(self.coverage)
 
     def run_from_gitlab(
         self,
@@ -275,7 +150,7 @@ class DaddySubagentsReflectiveWorkflow:
         results = checkpoint.completed_results[:]
         work_items = checkpoint.pending_work_items[:]
         attempts = self._attempts_from_results(results)
-        coverage_comparison = self._coverage_comparison_from_metadata(checkpoint.metadata)
+        coverage_comparison = CoverageComparator.from_metadata(checkpoint.metadata)
         baseline_payload = checkpoint.metadata.get("baseline_coverage")
         baseline_summary = (
             GlobalCoverageSummary(**baseline_payload)
@@ -291,7 +166,7 @@ class DaddySubagentsReflectiveWorkflow:
             tags={"workflow": "daddy_subagents_reflective", "source_type": repo_context.source_type, "run_id": run_id},
         ):
             tracer.log_params({"run_id": run_id, "resume": True})
-            new_results = self._dispatch_subagents(
+            new_results = self._dispatcher.dispatch(
                 repo_context,
                 workspace,
                 logger,
@@ -304,9 +179,8 @@ class DaddySubagentsReflectiveWorkflow:
             )
             results.extend(new_results)
             attempts = self._attempts_from_results(results)
-            pending = self._read_pending_integrations(workspace)
-            self._save_checkpoint(
-                checkpoint_store,
+            pending = self._dispatcher.read_pending_integrations(workspace)
+            checkpoint_store.build_and_save(
                 repo_context,
                 phase="resumed_completed",
                 pending_work_items=[],
@@ -402,8 +276,7 @@ class DaddySubagentsReflectiveWorkflow:
             }
         )
         tracer.log_text(overview, "overview.md")
-        self._save_checkpoint(
-            checkpoint_store,
+        checkpoint_store.build_and_save(
             repo_context,
             phase="analysis_completed",
             pending_work_items=[],
@@ -435,8 +308,7 @@ class DaddySubagentsReflectiveWorkflow:
         )
         if runtime.enabled:
             self._run_daddy_react(repo_context, workspace, logger, runtime, tracer, work_items)
-        self._save_checkpoint(
-            checkpoint_store,
+        checkpoint_store.build_and_save(
             repo_context,
             phase="coverage_completed",
             pending_work_items=work_items,
@@ -452,8 +324,7 @@ class DaddySubagentsReflectiveWorkflow:
             },
         )
         if self._pause_requested(workspace):
-            self._save_checkpoint(
-                checkpoint_store,
+            checkpoint_store.build_and_save(
                 repo_context,
                 phase="paused",
                 pending_work_items=work_items,
@@ -478,7 +349,7 @@ class DaddySubagentsReflectiveWorkflow:
                 summary_path=str(summary_path),
                 coverage_comparison_path=None,
             )
-        subagent_results = self._dispatch_subagents(
+        subagent_results = self._dispatcher.dispatch(
             repo_context,
             workspace,
             logger,
@@ -490,9 +361,8 @@ class DaddySubagentsReflectiveWorkflow:
             coverage_context_markdown_path,
         )
         attempts = self._attempts_from_results(subagent_results)
-        pending_integrations = self._read_pending_integrations(workspace)
-        self._save_checkpoint(
-            checkpoint_store,
+        pending_integrations = self._dispatcher.read_pending_integrations(workspace)
+        checkpoint_store.build_and_save(
             repo_context,
             phase="completed",
             pending_work_items=[],
@@ -510,7 +380,7 @@ class DaddySubagentsReflectiveWorkflow:
         if self.config.auto_integrate_successful_worktrees and any(
             item.status == "integrated" for item in pending_integrations
         ):
-            coverage_comparison = self._rerun_post_merge_coverage(
+            coverage_comparison = self._comparator.rerun_post_merge(
                 checkpoint_store=checkpoint_store,
                 repo_context=repo_context,
                 workspace=workspace,
@@ -560,86 +430,45 @@ class DaddySubagentsReflectiveWorkflow:
             coverage_comparison_path=coverage_comparison_path,
         )
 
-    def _dispatch_subagents(
-        self,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        logger: RunLogger,
-        runtime: DSPyRuntime,
-        tracer: MlflowTracer,
-        work_items: list[FileWorkItem],
-        existing_results: list[SubagentResult],
-        checkpoint_store: CheckpointStore,
-        coverage_context_path: Path,
-    ) -> list[SubagentResult]:
-        results: list[SubagentResult] = []
-        completed_files = {item.file_path for item in existing_results}
-        pending_queue = self._dedupe_work_items(work_items, exclude_files=completed_files)
-        in_flight: dict[Any, FileWorkItem] = {}
-        in_flight_files: set[str] = set()
-        run_memory_path = self._run_memory_path(workspace)
-        with ThreadPoolExecutor(max_workers=max(1, self.config.max_parallel_subagents)) as pool:
-            while pending_queue and len(in_flight) < max(1, self.config.max_parallel_subagents):
-                item = pending_queue.pop(0)
-                if item.file_path in in_flight_files:
-                    continue
-                if self._pause_requested(workspace):
-                    break
-                item.assigned_subagent_id = item.assigned_subagent_id or f"subagent_{item.priority_rank:03d}"
-                future = pool.submit(
-                    self._run_subagent,
-                    repo_context,
-                    workspace,
-                    logger,
-                    runtime,
-                    tracer,
-                    item,
-                    checkpoint_store,
-                    coverage_context_path,
-                )
-                in_flight[future] = item
-                in_flight_files.add(item.file_path)
-            while in_flight:
-                done, _pending = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
-                for future in done:
-                    item = in_flight.pop(future)
-                    in_flight_files.discard(item.file_path)
-                    result = future.result()
-                    self.memory.record_result(run_memory_path, repo_context, item, result)
-                    results.append(result)
-                    completed_files.add(result.file_path)
-                    while pending_queue and len(in_flight) < max(1, self.config.max_parallel_subagents):
-                        next_item = pending_queue.pop(0)
-                        if next_item.file_path in completed_files or next_item.file_path in in_flight_files:
-                            continue
-                        if self._pause_requested(workspace):
-                            pending_queue.insert(0, next_item)
-                            break
-                        next_item.assigned_subagent_id = next_item.assigned_subagent_id or f"subagent_{next_item.priority_rank:03d}"
-                        next_future = pool.submit(
-                            self._run_subagent,
-                            repo_context,
-                            workspace,
-                            logger,
-                            runtime,
-                            tracer,
-                            next_item,
-                            checkpoint_store,
-                            coverage_context_path,
-                        )
-                        in_flight[next_future] = next_item
-                        in_flight_files.add(next_item.file_path)
-                    pending_items = pending_queue + list(in_flight.values())
-                    self._save_checkpoint(
-                        checkpoint_store,
-                        repo_context,
-                        phase="subagents_running",
-                        pending_work_items=pending_items,
-                        completed_results=existing_results + results,
-                        pending_integrations=self._read_pending_integrations(workspace),
-                        paused=self._pause_requested(workspace),
-                    )
-        return sorted(results, key=lambda item: item.subagent_id)
+    def rerun_after_merge_coverage(self, run_id: str) -> CoverageComparison | None:
+        workspace = self.workspace_manager.create(run_id)
+        checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
+        checkpoint = checkpoint_store.load()
+        if not checkpoint:
+            raise ValueError(f"No checkpoint found for {run_id}")
+        baseline_payload = checkpoint.metadata.get("baseline_coverage")
+        if not baseline_payload:
+            return None
+        baseline_summary = GlobalCoverageSummary(**baseline_payload)
+        baseline_records = [
+            CoverageRecord(**item) for item in checkpoint.metadata.get("baseline_coverage_records", [])
+        ]
+        repo_context = self._make_repo_context(
+            run_id=run_id,
+            repo_url=checkpoint.repo_url,
+            repo_name=checkpoint.repo_name,
+            clone_path=Path(checkpoint.metadata["clone_path"]),
+            workspace=workspace,
+            source_type=checkpoint.metadata.get("source_type", "gitlab"),
+            module_paths=checkpoint.metadata.get("module_paths", []),
+        )
+        logger = self._build_logger(run_id, workspace)
+        comparison = self._comparator.rerun_post_merge(
+            checkpoint_store=checkpoint_store,
+            repo_context=repo_context,
+            workspace=workspace,
+            logger=logger,
+            baseline_summary=baseline_summary,
+            baseline_records=baseline_records,
+        )
+        if comparison:
+            self._refresh_reports_from_checkpoint(
+                checkpoint=checkpoint_store.load() or checkpoint,
+                repo_context=repo_context,
+                workspace=workspace,
+                coverage_comparison=comparison,
+            )
+        return comparison
 
     def _make_repo_context(
         self,
@@ -798,621 +627,6 @@ class DaddySubagentsReflectiveWorkflow:
         )
         return token_budget_path
 
-    def _compare_file_coverage(
-        self,
-        before: list[CoverageRecord],
-        after: list[CoverageRecord],
-    ) -> list[dict[str, Any]]:
-        before_map = {item.file_path: item for item in before}
-        after_map = {item.file_path: item for item in after}
-        rows: list[dict[str, Any]] = []
-        for file_path in sorted(set(before_map.keys()) | set(after_map.keys())):
-            before_record = before_map.get(file_path)
-            after_record = after_map.get(file_path)
-            before_percent = before_record.coverage_percent if before_record else 0.0
-            after_percent = after_record.coverage_percent if after_record else 0.0
-            before_missed = before_record.missed_lines if before_record else 0
-            after_missed = after_record.missed_lines if after_record else 0
-            if before_record and after_record:
-                status = "changed"
-            elif before_record and not after_record:
-                status = "removed"
-            else:
-                status = "new"
-            rows.append(
-                {
-                    "file_path": file_path,
-                    "module": (after_record.module if after_record else before_record.module if before_record else ""),
-                    "before_coverage_percent": before_percent,
-                    "after_coverage_percent": after_percent,
-                    "coverage_delta": round(after_percent - before_percent, 2),
-                    "before_missed_lines": before_missed,
-                    "after_missed_lines": after_missed,
-                    "missed_line_delta": before_missed - after_missed,
-                    "status": status,
-                }
-            )
-        return sorted(rows, key=lambda item: (item["coverage_delta"], item["missed_line_delta"], item["file_path"]))
-
-    def _run_subagent(
-        self,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        logger: RunLogger,
-        runtime: DSPyRuntime,
-        tracer: MlflowTracer,
-        item: FileWorkItem,
-        checkpoint_store: CheckpointStore,
-        coverage_context_path: Path,
-    ) -> SubagentResult:
-        subagent_id = item.assigned_subagent_id or new_run_id("subagent")
-        branch_name = f"subagent/{subagent_id}"
-        worktree_path = workspace.worktrees_dir / subagent_id
-        tool_context = ToolContext(
-            run_id=repo_context.run_id,
-            repo_root=repo_context.clone_path,
-            clone_root=repo_context.clone_path,
-            worktrees_root=workspace.worktrees_dir,
-            config=self.config,
-            logger=logger,
-            subagent_id=subagent_id,
-        )
-        toolset = SafeToolset(tool_context)
-        attempts: list[AttemptRecord] = []
-        final_summary = ""
-        commit_hash = ""
-        integration_status = "pending_review"
-        coverage_after: float | None = None
-        coverage_delta = 0.0
-        missed_line_reduction = 0
-        with logger.step("subagent.prepare", subagent_id=subagent_id, file_path=item.file_path) as step:
-            toolset.create_worktree(subagent_id, branch_name)
-            tool_context.active_worktree = worktree_path
-            step["summary"] = f"Worktree {worktree_path.name}"
-        if not runtime.enabled:
-            final_summary = "No DSPy model configured. Subagent cannot generate tests."
-            result = SubagentResult(
-                subagent_id=subagent_id,
-                file_path=item.file_path,
-                status="failed",
-                worktree_path=worktree_path,
-                branch_name=branch_name,
-                attempts=attempts,
-                final_summary=final_summary,
-                integration_status="skipped",
-                error_message=final_summary,
-            )
-            return result
-
-        prior_failures: list[str] = []
-        memory_insights = self.memory.lessons_for_item(self._run_memory_path(workspace), repo_context, item)
-        missed_code_snippets = self._missed_code_snippets(repo_context.clone_path, item)
-        for iteration in range(1, self.config.max_subagent_iterations + 1):
-            suggested_test_path = self._suggest_test_path(worktree_path, item.file_path, iteration)
-            objective = self._subagent_objective(
-                repo_context,
-                item,
-                suggested_test_path,
-                iteration,
-                prior_failures,
-                memory_insights,
-                coverage_context_path,
-                missed_code_snippets,
-            )
-            generated_file = ""
-            tool_summary = ""
-            validation_output = ""
-            status = "failed"
-            failure_analysis = ""
-            with logger.step(
-                "subagent.iteration",
-                subagent_id=subagent_id,
-                file_path=item.file_path,
-                iteration=iteration,
-                details={"suggested_test_path": suggested_test_path},
-            ) as step:
-                react = dspy.ReAct(
-                    "objective, file_path, suggested_test_path -> answer",
-                    tools=toolset.build_dspy_tools(),
-                    max_iters=6,
-                )
-                prediction = react(
-                    objective=objective,
-                    file_path=item.file_path,
-                    suggested_test_path=suggested_test_path,
-                )
-                tracer.tag_last_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "workflow": "daddy_subagents_reflective",
-                        "dspy_call": "subagent.react",
-                        "subagent_id": subagent_id,
-                        "iteration": str(iteration),
-                        "file_path": item.file_path,
-                    }
-                )
-                trajectory = getattr(prediction, "trajectory", {})
-                logger.log_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "subagent_id": subagent_id,
-                        "iteration": iteration,
-                        "file_path": item.file_path,
-                        "objective": objective,
-                        "trajectory": trajectory,
-                        "answer": getattr(prediction, "answer", str(prediction)),
-                    }
-                )
-                if tool_context.written_files:
-                    generated_file = tool_context.written_files[-1]
-                    validation_output = toolset.run_single_test(generated_file)
-                    status = "passed" if tool_context.last_single_test_exit_code == 0 else "failed"
-                else:
-                    validation_output = "No test file was generated."
-                    status = "failed"
-                tool_summary = json.dumps(trajectory, default=str)[:4000]
-                reflective_summary = runtime.reflect(objective, validation_output, "\n".join(prior_failures))
-                tracer.tag_last_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "workflow": "daddy_subagents_reflective",
-                        "dspy_call": "subagent.reflect",
-                        "subagent_id": subagent_id,
-                        "iteration": str(iteration),
-                        "file_path": item.file_path,
-                    }
-                )
-                if status != "passed":
-                    failure_analysis = runtime.analyze_failure(item.file_path, iteration, validation_output)
-                    tracer.tag_last_trace(
-                        {
-                            "run_id": repo_context.run_id,
-                            "workflow": "daddy_subagents_reflective",
-                            "dspy_call": "subagent.failure_analyst",
-                            "subagent_id": subagent_id,
-                            "iteration": str(iteration),
-                            "file_path": item.file_path,
-                        }
-                    )
-                else:
-                    failure_analysis = ""
-                failure_memory = failure_analysis or (
-                    validation_output.splitlines()[0] if validation_output else "Failure cause unavailable."
-                )
-                attempt = AttemptRecord(
-                    run_id=repo_context.run_id,
-                    subagent_id=subagent_id,
-                    file_path=item.file_path,
-                    iteration=iteration,
-                    prompt_version=PROMPT_VERSION,
-                    prompt_hash=prompt_hash(objective),
-                    tool_call_summary=tool_summary,
-                    generated_test_file=generated_file or None,
-                    single_test_command=" ".join(
-                        self.config.maven_command(
-                            "-q",
-                            f"-Dtest={Path(generated_file).stem if generated_file else '<none>'}",
-                            "test",
-                        )
-                    ),
-                    status=status,
-                    failure_summary="" if status == "passed" else failure_memory,
-                    reflective_summary=reflective_summary[:4000],
-                    failure_analysis=failure_analysis,
-                )
-                attempts.append(attempt)
-                item.status = status
-                step["summary"] = f"Iteration {iteration} {status}"
-                step["attempt_status"] = status
-                step["generated_test_file"] = generated_file or ""
-                step["failure_feedback"] = attempt.failure_summary[:800]
-                step["reflective_summary"] = attempt.reflective_summary[:800]
-                step["failure_analysis"] = attempt.failure_analysis[:800]
-                logger.log_event(
-                    "subagent.feedback",
-                    "completed",
-                    summary=f"{subagent_id} iteration {iteration} {status}",
-                    subagent_id=subagent_id,
-                    file_path=item.file_path,
-                    iteration=iteration,
-                    details={
-                        "generated_test_file": generated_file or "",
-                        "failure_feedback": attempt.failure_summary[:1500],
-                        "reflective_summary": attempt.reflective_summary[:1500],
-                        "failure_analysis": attempt.failure_analysis[:1500],
-                        "single_test_command": attempt.single_test_command,
-                    },
-                )
-                write_json(
-                    workspace.checkpoints_dir / f"{subagent_id}_iter_{iteration}.json",
-                    {"attempt": attempt.to_json(), "file_path": item.file_path},
-                )
-                if status == "passed":
-                    toolset.run_project_tests_with_coverage()
-                    refreshed = self.coverage.collect_reports(worktree_path)
-                    for record in refreshed:
-                        if record.file_path == item.file_path:
-                            coverage_after = record.coverage_percent
-                            coverage_delta = round(record.coverage_percent - item.coverage_percent, 2)
-                            missed_line_reduction = max(0, item.missed_lines - record.missed_lines)
-                            break
-                    commit_hash = toolset.commit_worktree_change(
-                        f"Add generated tests for {Path(item.file_path).name}"
-                    )
-                    final_summary = reflective_summary
-                    break
-                prior_failures.append(failure_memory)
-                if self._pause_requested(workspace):
-                    break
-        if not commit_hash:
-            logger.log_event(
-                "subagent.feedback.summary",
-                "completed",
-                summary=f"{subagent_id} finished without passing test",
-                subagent_id=subagent_id,
-                file_path=item.file_path,
-                details={
-                    "attempt_count": len(attempts),
-                    "last_failure_feedback": (attempts[-1].failure_summary[:1500] if attempts else ""),
-                    "last_reflective_summary": (attempts[-1].reflective_summary[:1500] if attempts else ""),
-                    "last_failure_analysis": (attempts[-1].failure_analysis[:1500] if attempts else ""),
-                },
-            )
-        if commit_hash:
-            decision = IntegrationDecision(
-                subagent_id=subagent_id,
-                branch_name=branch_name,
-                commit_hash=commit_hash,
-                status="pending_review",
-                file_path=item.file_path,
-                reason="Generated tests passed single-test validation",
-                priority_rank=item.priority_rank,
-            )
-            if self.config.auto_integrate_successful_worktrees:
-                try:
-                    toolset.integrate_worktree_result(commit_hash)
-                    decision.status = "integrated"
-                    integration_status = "integrated"
-                except Exception as exc:
-                    decision.status = "integration_failed"
-                    decision.reason = str(exc)
-                    integration_status = "integration_failed"
-            self._append_integration(workspace, decision)
-        if not final_summary:
-            latest_output = attempts[-1].failure_analysis if attempts and attempts[-1].failure_analysis else (
-                attempts[-1].failure_summary if attempts else "No attempts executed."
-            )
-            final_summary = runtime.reflect("final summary", latest_output, "\n".join(prior_failures))
-        return SubagentResult(
-            subagent_id=subagent_id,
-            file_path=item.file_path,
-            status="passed" if commit_hash else "failed",
-            worktree_path=worktree_path,
-            branch_name=branch_name,
-            commit_hash=commit_hash or None,
-            generated_test_files=[attempt.generated_test_file for attempt in attempts if attempt.generated_test_file],
-            attempts=attempts,
-            final_summary=final_summary,
-            integration_status=integration_status,
-            error_message="" if commit_hash else (attempts[-1].failure_summary if attempts else "No attempts executed."),
-            coverage_after=coverage_after,
-            coverage_delta=coverage_delta,
-            missed_line_reduction=missed_line_reduction,
-        )
-
-    def _build_logger(self, run_id: str, workspace: RunWorkspace) -> RunLogger:
-        return RunLogger(run_id, workspace.logs_dir, secrets=[self.config.gitlab_token, self.config.model.api_key])
-
-    def _repo_name(self, repo_url: str) -> str:
-        tail = repo_url.rstrip("/").split("/")[-1]
-        name = tail[:-4] if tail.endswith(".git") else tail
-        return slugify(name)[:40] or "repo"
-
-    def _suggest_test_path(self, worktree_root: Path, source_file_path: str, iteration: int) -> str:
-        source = Path(source_file_path)
-        parts = list(source.parts)
-        if "main" in parts:
-            parts[parts.index("main")] = "test"
-        elif "src" in parts:
-            parts = ["src", "test", "java", *parts[1:]]
-        if parts and parts[-1].endswith(".java"):
-            parts[-1] = f"{Path(parts[-1]).stem}GeneratedTestIter{iteration}.java"
-        else:
-            parts.append(f"GeneratedTestIter{iteration}.java")
-        return str((worktree_root / Path(*parts)).resolve())
-
-    def _subagent_objective(
-        self,
-        repo_context: RepoContext,
-        item: FileWorkItem,
-        suggested_test_path: str,
-        iteration: int,
-        prior_failures: list[str],
-        memory_insights: list[str],
-        coverage_context_path: Path,
-        missed_code_snippets: list[str],
-    ) -> str:
-        failure_text = "\n".join(f"- {failure}" for failure in prior_failures[-3:])
-        memory_text = "\n".join(f"- {insight}" for insight in memory_insights[:4])
-        missed_code_text = "\n".join(f"- {snippet}" for snippet in missed_code_snippets[:10])
-        return (
-            "You are a Java unit-test generation subagent working inside a Git worktree.\n"
-            "Write fresh, meaningful behavior-driven tests only for the assigned source file.\n"
-            "Rules:\n"
-            "- Create only a new test file.\n"
-            "- Do not modify production code.\n"
-            "- Do not modify existing tests.\n"
-            "- Do not depend on existing tests; create fresh test cases irrespective of existing tests.\n"
-            "- Use folder/file search and file reads before writing.\n"
-            "- Pass the full absolute file path to write_new_test_file.\n"
-            "- Run the single test after writing.\n"
-            f"Assigned file: {item.file_path}\n"
-            f"Coverage context artifact: {coverage_context_path}\n"
-            f"Current file coverage: {item.coverage_percent}%\n"
-            f"Uncovered code snippets in assigned file:\n{missed_code_text or '- none available'}\n"
-            "Target methods and branches represented by these uncovered snippets first.\n"
-            f"Shared memory:\n{memory_text or '- none yet'}\n"
-            f"Suggested test path: {suggested_test_path}\n"
-            f"Iteration: {iteration}\n"
-            f"Prior failure context (why):\n{failure_text or '- none'}"
-        )
-
-    def _missed_code_snippets(self, repo_root: Path, item: FileWorkItem, *, limit: int = 20) -> list[str]:
-        source_path = (repo_root / item.file_path).resolve()
-        try:
-            lines = source_path.read_text(encoding="utf-8").splitlines()
-        except OSError:
-            return []
-
-        snippets: list[str] = []
-        seen: set[str] = set()
-        for line_number in item.missed_line_numbers:
-            if line_number < 1 or line_number > len(lines):
-                continue
-            snippet = lines[line_number - 1].strip()
-            if not snippet:
-                continue
-            if snippet not in seen:
-                snippets.append(snippet[:300])
-                seen.add(snippet)
-            if len(snippets) >= limit:
-                break
-        return snippets
-
-    def _run_memory_path(self, workspace: RunWorkspace) -> Path:
-        return workspace.artifacts_dir / "memory.json"
-
-    def _pause_requested(self, workspace: RunWorkspace) -> bool:
-        return (workspace.control_dir / "pause.requested").exists()
-
-    def _save_checkpoint(
-        self,
-        store: CheckpointStore,
-        repo_context: RepoContext,
-        *,
-        phase: str,
-        pending_work_items: list[FileWorkItem],
-        completed_results: list[SubagentResult],
-        pending_integrations: list[IntegrationDecision],
-        paused: bool,
-        extra_metadata: dict[str, Any] | None = None,
-    ) -> None:
-        existing = store.load()
-        checkpoint = RunCheckpoint(
-            run_id=repo_context.run_id,
-            phase=phase,
-            repo_url=repo_context.repo_url,
-            repo_name=repo_context.repo_name,
-            paused=paused,
-            created_at=utc_timestamp(),
-            updated_at=utc_timestamp(),
-            pending_work_items=pending_work_items,
-            completed_results=completed_results,
-            pending_integrations=pending_integrations,
-            metadata={
-                **(existing.metadata if existing else {}),
-                "clone_path": str(repo_context.clone_path),
-                "source_type": repo_context.source_type,
-                "module_paths": repo_context.module_paths,
-                **(extra_metadata or {}),
-            },
-        )
-        store.save(checkpoint)
-
-    def _append_integration(self, workspace: RunWorkspace, decision: IntegrationDecision) -> None:
-        current = self._read_pending_integrations(workspace)
-        current = [
-            item
-            for item in current
-            if item.commit_hash != decision.commit_hash and item.file_path != decision.file_path
-        ]
-        current.append(decision)
-        write_json(workspace.integrations_path, [item.to_json() for item in self._sort_integrations(current)])
-
-    def _read_pending_integrations(self, workspace: RunWorkspace) -> list[IntegrationDecision]:
-        from agentic_testgen.utils import read_json
-
-        payload = read_json(workspace.integrations_path, default=[])
-        return self._sort_integrations([IntegrationDecision(**item) for item in payload])
-
-    def _apply_work_item_limit(self, work_items: list[FileWorkItem], max_files: int | None) -> list[FileWorkItem]:
-        effective_max = self.config.max_files_per_run if max_files is None else max_files
-        if effective_max is None or effective_max <= 0:
-            return work_items
-        return work_items[:effective_max]
-
-    def _dedupe_work_items(
-        self,
-        work_items: list[FileWorkItem],
-        *,
-        exclude_files: set[str] | None = None,
-    ) -> list[FileWorkItem]:
-        seen: set[str] = set(exclude_files or set())
-        deduped: list[FileWorkItem] = []
-        for item in sorted(work_items, key=lambda value: (value.priority_rank or 0, value.file_path)):
-            if item.file_path in seen:
-                continue
-            seen.add(item.file_path)
-            deduped.append(item)
-        return deduped
-
-    def _sort_integrations(self, decisions: list[IntegrationDecision]) -> list[IntegrationDecision]:
-        return sorted(decisions, key=lambda item: (item.priority_rank or 0, item.file_path, item.commit_hash))
-
-    def rerun_after_merge_coverage(self, run_id: str) -> CoverageComparison | None:
-        workspace = self.workspace_manager.create(run_id)
-        checkpoint_store = CheckpointStore(workspace.checkpoints_dir)
-        checkpoint = checkpoint_store.load()
-        if not checkpoint:
-            raise ValueError(f"No checkpoint found for {run_id}")
-        baseline_payload = checkpoint.metadata.get("baseline_coverage")
-        if not baseline_payload:
-            return None
-        baseline_summary = GlobalCoverageSummary(**baseline_payload)
-        baseline_records = [
-            CoverageRecord(**item) for item in checkpoint.metadata.get("baseline_coverage_records", [])
-        ]
-        repo_context = self._make_repo_context(
-            run_id=run_id,
-            repo_url=checkpoint.repo_url,
-            repo_name=checkpoint.repo_name,
-            clone_path=Path(checkpoint.metadata["clone_path"]),
-            workspace=workspace,
-            source_type=checkpoint.metadata.get("source_type", "gitlab"),
-            module_paths=checkpoint.metadata.get("module_paths", []),
-        )
-        logger = self._build_logger(run_id, workspace)
-        comparison = self._rerun_post_merge_coverage(
-            checkpoint_store=checkpoint_store,
-            repo_context=repo_context,
-            workspace=workspace,
-            logger=logger,
-            baseline_summary=baseline_summary,
-            baseline_records=baseline_records,
-        )
-        if comparison:
-            self._refresh_reports_from_checkpoint(
-                checkpoint=checkpoint_store.load() or checkpoint,
-                repo_context=repo_context,
-                workspace=workspace,
-                coverage_comparison=comparison,
-            )
-        return comparison
-
-    def _finalize_after_merge(
-        self,
-        *,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        logger: RunLogger,
-        baseline_summary: GlobalCoverageSummary,
-        baseline_records: list[CoverageRecord],
-    ) -> CoverageComparison | None:
-        report_writer = ReportWriter(workspace.artifacts_dir)
-        with logger.step("coverage.after_merge", details={"repo_root": str(repo_context.clone_path)}) as step:
-            result, records, maven_log_paths = self.coverage.run_tests_with_coverage(
-                repo_context.clone_path,
-                maven_logs_dir=workspace.logs_dir / "maven",
-                log_prefix="after-merge-project-coverage",
-            )
-            after_summary = self.coverage.summarize_global_coverage(records)
-            comparison = self.coverage.compare_global_coverage(baseline_summary, after_summary)
-            comparison_path = report_writer.write_coverage_comparison(comparison)
-            file_rows = self._compare_file_coverage(baseline_records, records)
-            file_json_path, file_md_path, file_csv_path = report_writer.write_file_coverage_comparison(file_rows)
-            step["summary"] = f"Coverage increased by {comparison.percentage_increase}%"
-            step["exit_code"] = result.exit_code
-            step["maven_log_paths"] = maven_log_paths
-            step["comparison_path"] = str(comparison_path)
-            step["file_coverage_comparison_json"] = str(file_json_path)
-            step["file_coverage_comparison_md"] = str(file_md_path)
-            step["file_coverage_comparison_csv"] = str(file_csv_path)
-            return comparison
-
-    def _rerun_post_merge_coverage(
-        self,
-        *,
-        checkpoint_store: CheckpointStore,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        logger: RunLogger,
-        baseline_summary: GlobalCoverageSummary,
-        baseline_records: list[CoverageRecord],
-    ) -> CoverageComparison | None:
-        comparison = self._finalize_after_merge(
-            repo_context=repo_context,
-            workspace=workspace,
-            logger=logger,
-            baseline_summary=baseline_summary,
-            baseline_records=baseline_records,
-        )
-        if comparison:
-            self._persist_coverage_comparison_metadata(
-                checkpoint_store,
-                comparison,
-                str(workspace.artifacts_dir / "coverage-comparison.md"),
-                str(workspace.artifacts_dir / "file-coverage-comparison.json"),
-                str(workspace.artifacts_dir / "file-coverage-comparison.md"),
-                str(workspace.artifacts_dir / "file-coverage-comparison.csv"),
-            )
-        return comparison
-
-    def _persist_coverage_comparison_metadata(
-        self,
-        checkpoint_store: CheckpointStore,
-        comparison: CoverageComparison,
-        comparison_path: str,
-        file_comparison_json_path: str,
-        file_comparison_markdown_path: str,
-        file_comparison_csv_path: str,
-    ) -> None:
-        checkpoint = checkpoint_store.load()
-        if not checkpoint:
-            return
-        checkpoint.metadata["after_merge_coverage"] = comparison.after.to_json()
-        checkpoint.metadata["coverage_percentage_increase"] = comparison.percentage_increase
-        checkpoint.metadata["coverage_comparison_path"] = comparison_path
-        checkpoint.metadata["file_coverage_comparison_json_path"] = file_comparison_json_path
-        checkpoint.metadata["file_coverage_comparison_markdown_path"] = file_comparison_markdown_path
-        checkpoint.metadata["file_coverage_comparison_csv_path"] = file_comparison_csv_path
-        checkpoint_store.save(checkpoint)
-
-    def _refresh_reports_from_checkpoint(
-        self,
-        *,
-        checkpoint: RunCheckpoint,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        coverage_comparison: CoverageComparison | None = None,
-    ) -> tuple[Path, Path]:
-        work_items = self._work_items_from_checkpoint(checkpoint)
-        return self._write_reports(
-            repo_context=repo_context,
-            workspace=workspace,
-            work_items=work_items,
-            results=checkpoint.completed_results,
-            coverage_comparison=coverage_comparison,
-        )
-
-    def _coverage_comparison_from_metadata(self, metadata: dict[str, Any]) -> CoverageComparison | None:
-        before_payload = metadata.get("baseline_coverage")
-        after_payload = metadata.get("after_merge_coverage")
-        if not before_payload or not after_payload:
-            return None
-        return CoverageComparison(
-            before=GlobalCoverageSummary(**before_payload),
-            after=GlobalCoverageSummary(**after_payload),
-            percentage_increase=float(metadata.get("coverage_percentage_increase", 0.0)),
-            covered_line_increase=after_payload.get("covered_lines", 0) - before_payload.get("covered_lines", 0),
-            missed_line_reduction=before_payload.get("missed_lines", 0) - after_payload.get("missed_lines", 0),
-        )
-
-    def _work_items_from_checkpoint(self, checkpoint: RunCheckpoint) -> list[FileWorkItem]:
-        payload = checkpoint.metadata.get("all_work_items")
-        if payload:
-            return [FileWorkItem(**item) for item in payload]
-        return checkpoint.pending_work_items[:]
-
     def _run_daddy_react(
         self,
         repo_context: RepoContext,
@@ -1461,9 +675,73 @@ class DaddySubagentsReflectiveWorkflow:
         except Exception as exc:
             logger.log_event("daddy.react", "failed", summary=str(exc))
 
+    def _refresh_reports_from_checkpoint(
+        self,
+        *,
+        checkpoint: RunCheckpoint,
+        repo_context: RepoContext,
+        workspace: RunWorkspace,
+        coverage_comparison: CoverageComparison | None = None,
+    ) -> tuple[Path, Path]:
+        work_items = self._work_items_from_checkpoint(checkpoint)
+        return self._write_reports(
+            repo_context=repo_context,
+            workspace=workspace,
+            work_items=work_items,
+            results=checkpoint.completed_results,
+            coverage_comparison=coverage_comparison,
+        )
+
+    def _work_items_from_checkpoint(self, checkpoint: RunCheckpoint) -> list[FileWorkItem]:
+        payload = checkpoint.metadata.get("all_work_items")
+        if payload:
+            return [FileWorkItem(**item) for item in payload]
+        return checkpoint.pending_work_items[:]
+
+    def _apply_work_item_limit(self, work_items: list[FileWorkItem], max_files: int | None) -> list[FileWorkItem]:
+        effective_max = self.config.max_files_per_run if max_files is None else max_files
+        if effective_max is None or effective_max <= 0:
+            return work_items
+        return work_items[:effective_max]
+
+    def _pause_requested(self, workspace: RunWorkspace) -> bool:
+        return (workspace.control_dir / "pause.requested").exists()
+
+    # Delegation shims — keep backward compatibility for tests and external callers
+    def _sort_integrations(self, decisions: list[IntegrationDecision]) -> list[IntegrationDecision]:
+        return self._dispatcher._sort_integrations(decisions)
+
+    def _dedupe_work_items(
+        self,
+        work_items: list[FileWorkItem],
+        *,
+        exclude_files: set[str] | None = None,
+    ) -> list[FileWorkItem]:
+        return self._dispatcher._dedupe_work_items(work_items, exclude_files=exclude_files)
+
+    def _append_integration(self, workspace: RunWorkspace, decision: IntegrationDecision) -> None:
+        self._dispatcher._append_integration(workspace, decision)
+
+    def _read_pending_integrations(self, workspace: RunWorkspace) -> list[IntegrationDecision]:
+        return self._dispatcher.read_pending_integrations(workspace)
+
+    def _subagent_objective(self, *args, **kwargs) -> str:
+        return self._dispatcher._subagent_objective(*args, **kwargs)
+
+    def _build_logger(self, run_id: str, workspace: RunWorkspace) -> RunLogger:
+        return RunLogger(run_id, workspace.logs_dir, secrets=[self.config.gitlab_token, self.config.model.api_key])
+
+    def _repo_name(self, repo_url: str) -> str:
+        tail = repo_url.rstrip("/").split("/")[-1]
+        name = tail[:-4] if tail.endswith(".git") else tail
+        return slugify(name)[:40] or "repo"
+
+    def _run_memory_path(self, workspace: RunWorkspace) -> Path:
+        return workspace.artifacts_dir / "memory.json"
+
     def _ensure_git_repository(self, repo_root: Path, logger: RunLogger) -> None:
         if not (repo_root / ".git").exists():
-            from agentic_testgen.utils import run_command
+            from agentic_testgen.core.utils import run_command
 
             run_command(["git", "init"], cwd=repo_root)
             run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
@@ -1472,7 +750,7 @@ class DaddySubagentsReflectiveWorkflow:
             run_command(["git", "commit", "-m", "Initial fixture snapshot"], cwd=repo_root)
             logger.log_event("git.init", "completed", summary=f"Initialized fixture repo at {repo_root}")
         else:
-            from agentic_testgen.utils import run_command
+            from agentic_testgen.core.utils import run_command
 
             run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
             run_command(["git", "config", "user.name", "Agentic Testgen"], cwd=repo_root)

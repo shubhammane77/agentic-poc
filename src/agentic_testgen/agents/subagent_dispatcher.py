@@ -9,23 +9,23 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     dspy = None  # type: ignore[assignment]
 
-from agentic_testgen.checkpointing import CheckpointStore
-from agentic_testgen.config import AppConfig
-from agentic_testgen.coverage import CoverageAnalyzer
-from agentic_testgen.dspy_runtime import DSPyRuntime
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.memory import MemoryManager
-from agentic_testgen.models import (
+from agentic_testgen.execution.checkpointing import CheckpointStore
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.analysis.coverage import CoverageAnalyzer
+from agentic_testgen.agents.dspy_runtime import DSPyRuntime
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.execution.memory import MemoryManager
+from agentic_testgen.core.models import (
     AttemptRecord,
     FileWorkItem,
     IntegrationDecision,
     RepoContext,
     SubagentResult,
 )
-from agentic_testgen.tools import SafeToolset, ToolContext
-from agentic_testgen.tracing import MlflowTracer
-from agentic_testgen.utils import new_run_id, prompt_hash, read_json, utc_timestamp, write_json
-from agentic_testgen.workspace import RunWorkspace
+from agentic_testgen.execution.tools import SafeToolset, ToolContext
+from agentic_testgen.integrations.tracing import MlflowTracer
+from agentic_testgen.core.utils import new_run_id, prompt_hash, read_json, utc_timestamp, write_json
+from agentic_testgen.execution.workspace import RunWorkspace
 
 PROMPT_VERSION = "daddy_subagents_reflective_v1"
 

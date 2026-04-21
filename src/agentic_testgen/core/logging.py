@@ -9,8 +9,8 @@ from pathlib import Path
 from threading import Lock
 from typing import Any, Iterator
 
-from agentic_testgen.models import LogEvent
-from agentic_testgen.utils import ensure_dir, utc_timestamp
+from agentic_testgen.core.models import LogEvent
+from agentic_testgen.core.utils import ensure_dir, utc_timestamp
 
 
 class SecretRedactor:

@@ -4,9 +4,9 @@ import os
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.models import CoverageComparison, CoverageRecord, FileWorkItem, GlobalCoverageSummary
-from agentic_testgen.utils import run_command, write_command_logs
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.core.models import CoverageComparison, CoverageRecord, FileWorkItem, GlobalCoverageSummary
+from agentic_testgen.core.utils import run_command, write_command_logs
 
 
 class CoverageAnalyzer:

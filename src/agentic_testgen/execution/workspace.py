@@ -4,7 +4,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_testgen.utils import ensure_dir
+from agentic_testgen.core.utils import ensure_dir
 
 
 @dataclass

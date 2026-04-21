@@ -5,7 +5,7 @@ from pathlib import Path
 from xml.sax.saxutils import escape
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from agentic_testgen.models import (
+from agentic_testgen.core.models import (
     AttemptRecord,
     CoverageComparison,
     FileWorkItem,
@@ -13,7 +13,7 @@ from agentic_testgen.models import (
     RepoContext,
     SubagentResult,
 )
-from agentic_testgen.utils import ensure_dir, read_json, write_json
+from agentic_testgen.core.utils import ensure_dir, read_json, write_json
 
 
 def _column_name(index: int) -> str:

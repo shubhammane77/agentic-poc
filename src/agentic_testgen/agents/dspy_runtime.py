@@ -7,9 +7,9 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     dspy = None  # type: ignore[assignment]
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.models import ModelDefinition
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.core.models import ModelDefinition
 
 
 class DSPyRuntime:

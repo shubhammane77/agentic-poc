@@ -15,7 +15,7 @@
 - Files: `src/agentic_testgen/tools.py:50`, `src/agentic_testgen/cli.py:22`
 - Risk: One site is updated without the other, causing inconsistent merge behavior
 
-**`test_quality.py` exists only in `__pycache__` (deleted source file):**
+
 - Symptoms: A compiled `.pyc` for `test_quality` exists at `tests/__pycache__/test_quality.cpython-312-pytest-9.0.2.pyc` but no `tests/test_quality.py` source file is present. A `quality.py` module is similarly absent from `src/agentic_testgen/` despite bytecode existing.
 - Files: `tests/__pycache__/test_quality.cpython-312-pytest-9.0.2.pyc`, `src/agentic_testgen/__pycache__/quality.cpython-312.pyc`
 - Risk: Orphaned bytecaches can cause confusing import errors; the deleted code may represent unfinished work

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,10 +10,10 @@ try:
 except ImportError:  # pragma: no cover - optional runtime dependency
     dspy = None  # type: ignore[assignment]
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.coverage import CoverageAnalyzer
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.utils import run_command, sanitize_command, write_command_logs
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.analysis.coverage import CoverageAnalyzer
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.core.utils import run_command, sanitize_command, write_command_logs
 
 
 @dataclass
@@ -27,7 +28,44 @@ class ToolContext:
     active_worktree: Path | None = None
     written_files: list[str] = field(default_factory=list)
     last_single_test_exit_code: int | None = None
+    last_single_test_passing_count: int = 0
     last_project_test_exit_code: int | None = None
+
+
+_TESTS_RUN_RE = re.compile(
+    r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+)"
+)
+
+
+def _count_passing_tests(output: str, module_root: Path, class_name: str) -> int:
+    """Return number of passing test cases for class_name.
+
+    Tries stdout/stderr first (available when tests fail or -q is absent),
+    then falls back to the surefire XML report (always written on disk).
+    """
+    for m in _TESTS_RUN_RE.finditer(output):
+        run, failures, errors, skipped = (int(m.group(i)) for i in range(1, 5))
+        return max(0, run - failures - errors - skipped)
+
+    # -q suppresses the summary line when all tests pass; parse the XML instead
+    for xml_path in (module_root / "target" / "surefire-reports").glob(f"TEST-*{class_name}*.xml"):
+        try:
+            text = xml_path.read_text(encoding="utf-8")
+            m = re.search(r'<testsuite[^>]+tests="(\d+)"[^>]+failures="(\d+)"[^>]+errors="(\d+)"[^>]+skipped="(\d+)"', text)
+            if not m:
+                m = re.search(r'tests="(\d+)".*?failures="(\d+)".*?errors="(\d+)".*?skipped="(\d+)"', text)
+            if m:
+                run, failures, errors, skipped = (int(m.group(i)) for i in range(1, 5))
+                return max(0, run - failures - errors - skipped)
+        except OSError:
+            continue
+    return 0
+
+
+def remove_merge_blockers(clone_path: Path) -> None:
+    blocker = clone_path / "coverage.xml"
+    if blocker.exists() and blocker.is_file():
+        blocker.unlink()
 
 
 class SafeToolset:
@@ -48,9 +86,7 @@ class SafeToolset:
         return self.context.logger.logs_dir / "maven"
 
     def _remove_merge_blockers(self) -> None:
-        blocker = self.context.clone_root / "coverage.xml"
-        if blocker.exists() and blocker.is_file():
-            blocker.unlink()
+        remove_merge_blockers(self.context.clone_root)
 
     def _resolve_active_path(self, path_value: str) -> Path:
         path = Path(path_value)
@@ -253,16 +289,20 @@ class SafeToolset:
                 result,
             )
             self.context.last_single_test_exit_code = result.exit_code
+            self.context.last_single_test_passing_count = _count_passing_tests(
+                result.stdout + "\n" + result.stderr, module_root, class_name
+            )
             step["summary"] = f"Ran {class_name}"
             step["resolved_path"] = str(target)
             step["module_root"] = str(module_root)
             step["command"] = sanitize_command(cmd)
             step["exit_code"] = result.exit_code
+            step["passing_count"] = self.context.last_single_test_passing_count
             step["stdout_preview"] = result.stdout[:500]
             step["stderr_preview"] = result.stderr[:500]
             step["maven_log_paths"] = log_paths
             if result.ok:
-                return f"success: single test {class_name} passed"
+                return f"success: single test {class_name} passed ({self.context.last_single_test_passing_count} passing)"
             return (result.stdout + "\n" + result.stderr).strip()
 
     def run_project_tests_with_coverage(self) -> str:

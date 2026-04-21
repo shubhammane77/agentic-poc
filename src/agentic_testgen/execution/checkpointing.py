@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
-from agentic_testgen.models import AttemptRecord, FileWorkItem, IntegrationDecision, RunCheckpoint, SubagentResult
-from agentic_testgen.utils import read_json, utc_timestamp, write_json
+from agentic_testgen.core.models import AttemptRecord, FileWorkItem, IntegrationDecision, RepoContext, RunCheckpoint, SubagentResult
+from agentic_testgen.core.utils import read_json, utc_timestamp, write_json
 
 
 class CheckpointStore:
@@ -23,6 +24,39 @@ class CheckpointStore:
         payload["completed_results"] = self._load_completed_results(payload)
         payload["pending_integrations"] = [IntegrationDecision(**item) for item in payload.get("pending_integrations", [])]
         return RunCheckpoint(**payload)
+
+    def build_and_save(
+        self,
+        repo_context: RepoContext,
+        *,
+        phase: str,
+        pending_work_items: list[FileWorkItem],
+        completed_results: list[SubagentResult],
+        pending_integrations: list[IntegrationDecision],
+        paused: bool,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        existing = self.load()
+        checkpoint = RunCheckpoint(
+            run_id=repo_context.run_id,
+            phase=phase,
+            repo_url=repo_context.repo_url,
+            repo_name=repo_context.repo_name,
+            paused=paused,
+            created_at=utc_timestamp(),
+            updated_at=utc_timestamp(),
+            pending_work_items=pending_work_items,
+            completed_results=completed_results,
+            pending_integrations=pending_integrations,
+            metadata={
+                **(existing.metadata if existing else {}),
+                "clone_path": str(repo_context.clone_path),
+                "source_type": repo_context.source_type,
+                "module_paths": repo_context.module_paths,
+                **(extra_metadata or {}),
+            },
+        )
+        self.save(checkpoint)
 
     def _load_completed_results(self, payload: dict) -> list[SubagentResult]:
         completed_results: list[SubagentResult] = []

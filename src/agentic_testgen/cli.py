@@ -4,25 +4,20 @@ from pathlib import Path
 
 import typer
 
-from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.checkpointing import CheckpointStore
-from agentic_testgen.config import AppConfig
-from agentic_testgen.evaluation import ModelMatrixEvaluator
-from agentic_testgen.models import IntegrationDecision
-from agentic_testgen.utils import read_json, run_command, tail_lines, write_json
-from agentic_testgen.workspace import WorkspaceManager
+from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.execution.tools import remove_merge_blockers
+from agentic_testgen.execution.checkpointing import CheckpointStore
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.analysis.evaluation import ModelMatrixEvaluator
+from agentic_testgen.core.models import IntegrationDecision
+from agentic_testgen.core.utils import read_json, run_command, tail_lines, write_json
+from agentic_testgen.execution.workspace import WorkspaceManager
 
 app = typer.Typer(help="DSPy-based test generation platform for GitLab Maven repos.")
 
 
 def _config() -> AppConfig:
     return AppConfig.load()
-
-
-def _remove_merge_blockers(clone_path: Path) -> None:
-    blocker = clone_path / "coverage.xml"
-    if blocker.exists() and blocker.is_file():
-        blocker.unlink()
 
 
 def main() -> None:
@@ -170,7 +165,7 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
         if commit_hash and decision.commit_hash != commit_hash:
             remaining.append(decision)
             continue
-        _remove_merge_blockers(clone_path)
+        remove_merge_blockers(clone_path)
         result = run_command(["git", "cherry-pick", decision.commit_hash], cwd=clone_path)
         if result.ok:
             integrated += 1

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from agentic_testgen.utils import bool_from_env, int_from_env, workspace_default_root
+from agentic_testgen.core.utils import bool_from_env, float_from_env, int_from_env, workspace_default_root
 
 
 @dataclass
@@ -16,6 +16,7 @@ class ModelSettings:
     model_name: str = ""
     api_key: str = ""
     api_base: str = ""
+    temperature: float = 0.0
 
     @property
     def configured(self) -> bool:
@@ -83,7 +84,7 @@ class AppConfig:
                 model_name=os.getenv("MODEL_NAME", "").strip(),
                 api_key=os.getenv("MODEL_API_KEY", "").strip(),
                 api_base=os.getenv("MODEL_API_BASE", "").strip(),
-                temperature=os.getenv("TEMPERATURE", "").strip(),
+                temperature=float_from_env(os.getenv("TEMPERATURE"), 0.0),
             ),
             mlflow=MlflowSettings(
                 tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000").strip(),

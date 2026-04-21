@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agentic_testgen.models import FileWorkItem, RepoContext, SubagentResult
-from agentic_testgen.utils import read_json, utc_timestamp, write_json
+from agentic_testgen.core.models import FileWorkItem, RepoContext, SubagentResult
+from agentic_testgen.core.utils import read_json, utc_timestamp, write_json
 
 MAX_MEMORY_ENTRIES = 50
 

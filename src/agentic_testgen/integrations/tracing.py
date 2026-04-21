@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.request import urlopen
 
-from agentic_testgen.config import MlflowSettings
-from agentic_testgen.logging import RunLogger
+from agentic_testgen.core.config import MlflowSettings
+from agentic_testgen.core.logging import RunLogger
 
 
 class MlflowTracer:
