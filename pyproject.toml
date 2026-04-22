@@ -8,6 +8,10 @@ version = "0.1.0"
 description = "DSPy-based test generation platform for GitLab Maven repos"
 readme = "README.md"
 requires-python = ">=3.13"
+license = "CC-BY-NC-4.0"
+authors = [
+    { name = "Shubham Mane" },
+]
 dependencies = [
     "dspy>=3.1.3",
     "dspy-ai>=3.1.3",
@@ -18,6 +22,9 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "typer>=0.12.0",
 ]
+
+[project.urls]
+LinkedIn = "https://www.linkedin.com/in/shubhammane"
 
 [project.scripts]
 testgen = "agentic_testgen.cli:main"
