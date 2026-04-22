@@ -154,6 +154,38 @@ class ToolWriteGuardTests(unittest.TestCase):
             self.assertEqual(4, toolset.context.last_single_test_executed_count)
             self.assertEqual(2, toolset.context.last_single_test_passing_count)
 
+    def test_read_folder_structure_ignores_build_and_resource_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            (root / "src").mkdir(parents=True, exist_ok=True)
+            (root / "src" / "main.txt").write_text("ok", encoding="utf-8")
+            (root / ".git" / "config").parent.mkdir(parents=True, exist_ok=True)
+            (root / ".git" / "config").write_text("ignored", encoding="utf-8")
+            (root / "target" / "classes" / "A.class").parent.mkdir(parents=True, exist_ok=True)
+            (root / "target" / "classes" / "A.class").write_text("", encoding="utf-8")
+            (root / "build" / "tmp.txt").parent.mkdir(parents=True, exist_ok=True)
+            (root / "build" / "tmp.txt").write_text("", encoding="utf-8")
+            (root / "out" / "report.txt").parent.mkdir(parents=True, exist_ok=True)
+            (root / "out" / "report.txt").write_text("", encoding="utf-8")
+            (root / "generated-resources" / "x.txt").parent.mkdir(parents=True, exist_ok=True)
+            (root / "generated-resources" / "x.txt").write_text("", encoding="utf-8")
+            (root / "generated-resorruces" / "x.txt").parent.mkdir(parents=True, exist_ok=True)
+            (root / "generated-resorruces" / "x.txt").write_text("", encoding="utf-8")
+            (root / "node_modules" / "lib.js").parent.mkdir(parents=True, exist_ok=True)
+            (root / "node_modules" / "lib.js").write_text("", encoding="utf-8")
+            toolset = self._toolset(root)
+
+            output = toolset.read_folder_structure(".", max_depth=5)
+
+            self.assertIn("src/main.txt", output)
+            self.assertNotIn(".git", output)
+            self.assertNotIn("target/", output)
+            self.assertNotIn("build/", output)
+            self.assertNotIn("out/", output)
+            self.assertNotIn("generated-resources/", output)
+            self.assertNotIn("generated-resorruces/", output)
+            self.assertNotIn("node_modules/", output)
+
 
 if __name__ == "__main__":
     unittest.main()

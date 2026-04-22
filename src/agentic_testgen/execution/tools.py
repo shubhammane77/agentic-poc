@@ -39,6 +39,15 @@ _TESTS_RUN_RE = re.compile(
     r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+)"
 )
 _JUNIT_METHOD_ANNOTATIONS = {"Test", "ParameterizedTest", "RepeatedTest", "TestFactory", "TestTemplate"}
+_FOLDER_STRUCTURE_IGNORED_DIRS = {
+    ".git",
+    "target",
+    "build",
+    "out",
+    "generated-resources",
+    "generated-resorruces",
+    "node_modules",
+}
 
 
 def _is_junit_method_annotation(line: str) -> bool:
@@ -196,10 +205,13 @@ class SafeToolset:
             root = self._resolve_active_path(folder_path)
             lines: list[str] = []
             for path in sorted(root.rglob("*")):
-                depth = len(path.relative_to(root).parts)
+                relative = path.relative_to(root)
+                if any(part in _FOLDER_STRUCTURE_IGNORED_DIRS for part in relative.parts):
+                    continue
+                depth = len(relative.parts)
                 if depth > max_depth:
                     continue
-                lines.append(str(path.relative_to(root)))
+                lines.append(str(relative))
             summary = "\n".join(lines[:500])
             step["summary"] = f"Listed {root.relative_to(self.active_root_resolved)}"
             step["resolved_path"] = str(root)

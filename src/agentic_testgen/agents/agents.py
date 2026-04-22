@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 from agentic_testgen.execution.checkpointing import CheckpointStore
@@ -27,8 +28,9 @@ from agentic_testgen.core.models import (
 from agentic_testgen.analysis.reporting import ReportWriter
 from agentic_testgen.agents.subagent_dispatcher import SubagentDispatcher
 from agentic_testgen.execution.tools import SafeToolset, ToolContext
+from agentic_testgen.integrations.gitlab import sanitize_repo_url
 from agentic_testgen.integrations.tracing import MlflowTracer
-from agentic_testgen.core.utils import new_run_id, slugify, utc_timestamp, write_json
+from agentic_testgen.core.utils import ensure_dir, new_run_id, prompt_hash, run_command, slugify, utc_timestamp, write_json
 from agentic_testgen.execution.workspace import RunWorkspace, WorkspaceManager
 
 
@@ -62,12 +64,11 @@ class DaddySubagentsReflectiveWorkflow:
             tags={"workflow": "daddy_subagents_reflective", "source_type": "gitlab", "run_id": run_id},
         ):
             tracer.log_params({"repo_url": repo_url, "repo_name": repo_name, "run_id": run_id})
-            with logger.step("gitlab.clone", details={"repo": repo_url}) as step:
-                manager = GitLabRepositoryManager(self.config, logger)
-                result = manager.clone(repo_url, clone_target)
-                if not result.ok:
-                    raise RuntimeError(result.stderr or result.stdout)
-                step["summary"] = f"Cloned {repo_name}"
+            manager = GitLabRepositoryManager(self.config, logger)
+            cached_repo = self._prepare_cached_repo(repo_url, repo_name, manager, logger)
+            with logger.step("gitlab.copy_cached_repo", details={"source": str(cached_repo), "destination": str(clone_target)}) as step:
+                self.workspace_manager.copy_local_repo(cached_repo, clone_target)
+                step["summary"] = f"Copied cached repository into run workspace for {repo_name}"
             return self._execute(
                 run_id=run_id,
                 repo_url=repo_url,
@@ -739,10 +740,56 @@ class DaddySubagentsReflectiveWorkflow:
     def _run_memory_path(self, workspace: RunWorkspace) -> Path:
         return workspace.artifacts_dir / "memory.json"
 
+    def _cached_repo_path(self, repo_url: str, repo_name: str) -> Path:
+        repo_key = f"{repo_name}-{prompt_hash(sanitize_repo_url(repo_url))}"
+        return ensure_dir(self.config.workspace_root / "repo-cache") / repo_key
+
+    def _prepare_cached_repo(
+        self,
+        repo_url: str,
+        repo_name: str,
+        manager: GitLabRepositoryManager,
+        logger: RunLogger,
+    ) -> Path:
+        cached_repo = self._cached_repo_path(repo_url, repo_name)
+        with logger.step("gitlab.clone_or_reuse_cache", details={"repo": repo_url, "cache_path": str(cached_repo)}) as step:
+            if cached_repo.exists() and (cached_repo / ".git").exists():
+                step["summary"] = f"Using cached clone for {repo_name}"
+                return cached_repo
+            if cached_repo.exists():
+                shutil.rmtree(cached_repo)
+            result = manager.clone(repo_url, cached_repo)
+            if not result.ok:
+                raise RuntimeError(result.stderr or result.stdout)
+            step["summary"] = f"Cloned {repo_name} into local cache"
+            self._install_maven_dependencies(cached_repo, logger)
+            return cached_repo
+
+    def _install_maven_dependencies(self, repo_root: Path, logger: RunLogger) -> None:
+        with logger.step("repo.maven_install", details={"repo_root": str(repo_root)}) as step:
+            if not (repo_root / "pom.xml").exists():
+                step["summary"] = "Skipped Maven install because pom.xml was not found at repository root"
+                step["status"] = "skipped"
+                return
+            env: dict[str, str] = {}
+            if self.config.java_home:
+                env["JAVA_HOME"] = self.config.java_home
+            if self.config.maven_home:
+                env["MAVEN_HOME"] = self.config.maven_home
+            command = self.config.maven_command("install")
+            result = run_command(command, cwd=repo_root, env=env or None)
+            step["command"] = " ".join(command)
+            step["exit_code"] = result.exit_code
+            step["stdout_preview"] = result.stdout[:500]
+            step["stderr_preview"] = result.stderr[:500]
+            if result.ok:
+                step["summary"] = "Installed Maven dependencies in local repository"
+                return
+            step["summary"] = "Maven install failed; continuing workflow"
+            step["status"] = "failed"
+
     def _ensure_git_repository(self, repo_root: Path, logger: RunLogger) -> None:
         if not (repo_root / ".git").exists():
-            from agentic_testgen.core.utils import run_command
-
             run_command(["git", "init"], cwd=repo_root)
             run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
             run_command(["git", "config", "user.name", "Agentic Testgen"], cwd=repo_root)
@@ -750,7 +797,5 @@ class DaddySubagentsReflectiveWorkflow:
             run_command(["git", "commit", "-m", "Initial fixture snapshot"], cwd=repo_root)
             logger.log_event("git.init", "completed", summary=f"Initialized fixture repo at {repo_root}")
         else:
-            from agentic_testgen.core.utils import run_command
-
             run_command(["git", "config", "user.email", "agentic-testgen@example.com"], cwd=repo_root)
             run_command(["git", "config", "user.name", "Agentic Testgen"], cwd=repo_root)
