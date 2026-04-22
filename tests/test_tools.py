@@ -175,9 +175,10 @@ class ToolWriteGuardTests(unittest.TestCase):
             (root / "node_modules" / "lib.js").write_text("", encoding="utf-8")
             toolset = self._toolset(root)
 
-            output = toolset.read_folder_structure(".", max_depth=5)
+            output = toolset.read_folder_structure(".")
 
-            self.assertIn("src/main.txt", output)
+            self.assertIn("src/:", output)
+            self.assertIn("  main.txt:", output)
             self.assertNotIn(".git", output)
             self.assertNotIn("target/", output)
             self.assertNotIn("build/", output)
