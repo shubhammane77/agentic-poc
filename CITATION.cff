@@ -1,0 +1,8 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "agentic-testgen"
+authors:
+  - family-names: "Mane"
+    given-names: "Shubham"
+    url: "https://www.linkedin.com/in/shubhammane"
+license: "CC-BY-NC-4.0"

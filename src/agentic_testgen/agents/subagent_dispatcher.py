@@ -4,14 +4,10 @@ import json
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
-try:
-    import dspy
-except ImportError:  # pragma: no cover - optional runtime dependency
-    dspy = None  # type: ignore[assignment]
-
 from agentic_testgen.execution.checkpointing import CheckpointStore
 from agentic_testgen.core.config import AppConfig
 from agentic_testgen.analysis.coverage import CoverageAnalyzer
+from agentic_testgen.agents.custom_react import CustomReAct
 from agentic_testgen.agents.dspy_runtime import DSPyRuntime
 from agentic_testgen.core.logging import RunLogger
 from agentic_testgen.execution.memory import MemoryManager
@@ -193,10 +189,10 @@ class SubagentDispatcher:
                 iteration=iteration,
                 details={"suggested_test_path": suggested_test_path},
             ) as step:
-                react = dspy.ReAct(
+                react = CustomReAct(
                     "objective, file_path, suggested_test_path -> answer",
                     tools=toolset.build_dspy_tools(),
-                    max_iters=6,
+                    max_iters=self.config.max_react_iters_subagent,
                 )
                 prediction = react(
                     objective=objective,
@@ -226,20 +222,29 @@ class SubagentDispatcher:
                     }
                 )
                 iteration_files = [f for f in tool_context.written_files if f not in files_before_iteration]
+                iteration_created_test_count = 0
+                iteration_successful_test_count = 0
                 if iteration_files:
                     best_file = iteration_files[0]
                     best_passing = -1
                     best_exit_code: int | None = None
                     validation_output = ""
+                    candidate_metrics: list[tuple[int, int]] = []
                     for candidate in iteration_files:
+                        created_count = tool_context.written_file_test_counts.get(candidate, 0)
                         candidate_output = toolset.run_single_test(candidate)
                         candidate_passing = tool_context.last_single_test_passing_count
                         candidate_exit_code = tool_context.last_single_test_exit_code
+                        candidate_metrics.append((created_count, candidate_passing))
                         if candidate_passing > best_passing:
                             best_file = candidate
                             best_passing = candidate_passing
                             best_exit_code = candidate_exit_code
                             validation_output = candidate_output
+                    (
+                        iteration_created_test_count,
+                        iteration_successful_test_count,
+                    ) = self._aggregate_iteration_test_counts(candidate_metrics)
                     generated_file = best_file
                     status = "passed" if best_exit_code == 0 else "failed"
                 else:
@@ -295,12 +300,18 @@ class SubagentDispatcher:
                     failure_summary="" if status == "passed" else failure_memory,
                     reflective_summary=reflective_summary[:4000],
                     failure_analysis=failure_analysis,
+                    created_test_count=iteration_created_test_count,
+                    successful_test_count=iteration_successful_test_count,
+                    candidate_count=len(iteration_files),
                 )
                 attempts.append(attempt)
                 item.status = status
                 step["summary"] = f"Iteration {iteration} {status}"
                 step["attempt_status"] = status
                 step["generated_test_file"] = generated_file or ""
+                step["candidate_count"] = attempt.candidate_count
+                step["created_test_count"] = attempt.created_test_count
+                step["successful_test_count"] = attempt.successful_test_count
                 step["failure_feedback"] = attempt.failure_summary[:800]
                 step["reflective_summary"] = attempt.reflective_summary[:800]
                 step["failure_analysis"] = attempt.failure_analysis[:800]
@@ -317,6 +328,27 @@ class SubagentDispatcher:
                         "reflective_summary": attempt.reflective_summary[:1500],
                         "failure_analysis": attempt.failure_analysis[:1500],
                         "single_test_command": attempt.single_test_command,
+                    },
+                )
+                logger.log_event(
+                    "subagent.iteration.test_counts",
+                    "completed",
+                    summary=(
+                        f"{subagent_id} iteration {iteration} created={attempt.created_test_count} "
+                        f"successful={attempt.successful_test_count}"
+                    ),
+                    subagent_id=subagent_id,
+                    file_path=item.file_path,
+                    iteration=iteration,
+                    details={
+                        "candidate_count": attempt.candidate_count,
+                        "created_test_count": attempt.created_test_count,
+                        "successful_test_count": attempt.successful_test_count,
+                        "test_success_ratio": (
+                            round(attempt.successful_test_count / attempt.created_test_count, 4)
+                            if attempt.created_test_count
+                            else 0.0
+                        ),
                     },
                 )
                 write_json(
@@ -504,3 +536,14 @@ class SubagentDispatcher:
 
     def _run_memory_path(self, workspace: RunWorkspace) -> Path:
         return workspace.artifacts_dir / "memory.json"
+
+    @staticmethod
+    def _aggregate_iteration_test_counts(candidate_metrics: list[tuple[int, int]]) -> tuple[int, int]:
+        created_total = 0
+        successful_total = 0
+        for created_count, passing_count in candidate_metrics:
+            normalized_created = max(0, int(created_count))
+            normalized_passing = max(0, int(passing_count))
+            created_total += normalized_created
+            successful_total += min(normalized_created, normalized_passing)
+        return created_total, successful_total

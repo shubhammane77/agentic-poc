@@ -5,7 +5,7 @@ from pathlib import Path
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.workspace import WorkspaceManager
+from agentic_testgen.execution.workspace import WorkspaceManager
 
 
 class WorkspaceTests(unittest.TestCase):

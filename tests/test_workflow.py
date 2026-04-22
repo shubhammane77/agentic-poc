@@ -1,13 +1,14 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig, MlflowSettings
-from agentic_testgen.models import CoverageRecord, FileWorkItem, RepoContext
-from agentic_testgen.utils import CommandResult
+from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.core.config import AppConfig, MlflowSettings
+from agentic_testgen.core.models import CoverageRecord, FileWorkItem, RepoContext
+from agentic_testgen.core.utils import CommandResult
 
 
 class WorkflowTests(unittest.TestCase):
@@ -88,6 +89,109 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("Coverage context artifact:", objective)
         self.assertIn("Uncovered code snippets in assigned file:", objective)
         self.assertIn("if (input == null) {", objective)
+
+    def test_run_from_gitlab_runs_maven_install_after_clone(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                gitlab_token="dummy-token",
+                workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
+            )
+            workflow = DaddySubagentsReflectiveWorkflow(config)
+            expected_result = MagicMock(name="workflow-result")
+
+            with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(
+                "agentic_testgen.agents.agents.run_command"
+            ) as mocked_run, patch.object(workflow, "_execute", return_value=expected_result) as mocked_execute:
+                manager = manager_cls.return_value
+
+                def _clone(repo_url: str, destination: Path) -> CommandResult:
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / ".git").mkdir(parents=True, exist_ok=True)
+                    (destination / "pom.xml").write_text("<project/>", encoding="utf-8")
+                    return CommandResult(args=["git", "clone"], exit_code=0, stdout="", stderr="", duration_seconds=0.01)
+
+                manager.clone.side_effect = _clone
+                mocked_run.return_value = CommandResult(
+                    args=["mvn", "install"],
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    duration_seconds=0.01,
+                )
+
+                result = workflow.run_from_gitlab("https://gitlab.example.com/group/project.git", run_id="run_123")
+
+            self.assertIs(result, expected_result)
+            self.assertTrue(mocked_execute.called)
+            self.assertEqual(1, mocked_run.call_count)
+            install_call = mocked_run.call_args
+            self.assertEqual(config.maven_command("install"), install_call.args[0])
+            self.assertIn("cwd", install_call.kwargs)
+            self.assertTrue((Path(install_call.kwargs["cwd"]) / "pom.xml").exists())
+
+    def test_run_from_gitlab_skips_maven_install_without_root_pom(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                gitlab_token="dummy-token",
+                workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
+            )
+            workflow = DaddySubagentsReflectiveWorkflow(config)
+            expected_result = MagicMock(name="workflow-result")
+
+            with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(
+                "agentic_testgen.agents.agents.run_command"
+            ) as mocked_run, patch.object(workflow, "_execute", return_value=expected_result):
+                manager = manager_cls.return_value
+
+                def _clone(repo_url: str, destination: Path) -> CommandResult:
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / ".git").mkdir(parents=True, exist_ok=True)
+                    return CommandResult(args=["git", "clone"], exit_code=0, stdout="", stderr="", duration_seconds=0.01)
+
+                manager.clone.side_effect = _clone
+
+                workflow.run_from_gitlab("https://gitlab.example.com/group/project.git", run_id="run_456")
+
+            self.assertFalse(mocked_run.called)
+
+    def test_run_from_gitlab_reuses_cached_clone_between_runs(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = AppConfig(
+                gitlab_token="dummy-token",
+                workspace_root=Path(tmpdir),
+                mlflow=MlflowSettings(enabled=False),
+            )
+            workflow = DaddySubagentsReflectiveWorkflow(config)
+            expected_result = MagicMock(name="workflow-result")
+
+            with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(
+                "agentic_testgen.agents.agents.run_command"
+            ) as mocked_run, patch.object(workflow, "_execute", return_value=expected_result) as mocked_execute:
+                manager = manager_cls.return_value
+
+                def _clone(repo_url: str, destination: Path) -> CommandResult:
+                    destination.mkdir(parents=True, exist_ok=True)
+                    (destination / ".git").mkdir(parents=True, exist_ok=True)
+                    (destination / "pom.xml").write_text("<project/>", encoding="utf-8")
+                    return CommandResult(args=["git", "clone"], exit_code=0, stdout="", stderr="", duration_seconds=0.01)
+
+                manager.clone.side_effect = _clone
+                mocked_run.return_value = CommandResult(
+                    args=["mvn", "install"],
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    duration_seconds=0.01,
+                )
+
+                workflow.run_from_gitlab("https://gitlab.example.com/group/project.git", run_id="run_1")
+                workflow.run_from_gitlab("https://gitlab.example.com/group/project.git", run_id="run_2")
+
+            self.assertEqual(1, manager.clone.call_count)
+            self.assertEqual(1, mocked_run.call_count)
+            self.assertEqual(2, mocked_execute.call_count)
 
 
 if __name__ == "__main__":

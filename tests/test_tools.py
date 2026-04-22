@@ -1,12 +1,14 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.logging import RunLogger
-from agentic_testgen.tools import SafeToolset, ToolContext
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.core.logging import RunLogger
+from agentic_testgen.execution.tools import SafeToolset, ToolContext
+from agentic_testgen.core.utils import CommandResult
 
 
 class ToolWriteGuardTests(unittest.TestCase):

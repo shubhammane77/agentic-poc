@@ -42,6 +42,8 @@ class DSPyRuntime:
             api_base = self.config.model.api_base
             self.model_id = model_name
         temperature: float = self.config.model.temperature
+        top_p: float = self.config.model.top_p
+        max_tokens: int | None = self.config.model.max_tokens
 
         final_model = model_name
         if "/" not in final_model and self.config.model.provider:
@@ -53,6 +55,9 @@ class DSPyRuntime:
             if api_base:
                 kwargs["api_base"] = api_base
             kwargs["temperature"] = float(temperature)
+            kwargs["top_p"] = float(top_p)
+            if max_tokens is not None:
+                kwargs["max_tokens"] = int(max_tokens)
             lm = dspy.LM(final_model, **kwargs)
             dspy.configure(lm=lm)
             self.enabled = True

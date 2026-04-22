@@ -195,6 +195,9 @@ class ReportWriter:
                 "failure_summary",
                 "reflective_summary",
                 "failure_analysis",
+                "created_test_count",
+                "successful_test_count",
+                "candidate_count",
             ]],
             "model_eval": [[
                 "case_id",
@@ -204,6 +207,9 @@ class ReportWriter:
                 "status",
                 "compile_success",
                 "pass_rate",
+                "test_success_ratio",
+                "created_test_count",
+                "successful_test_count",
                 "coverage_delta",
                 "missed_line_reduction",
                 "forbidden_edit_rate",
@@ -273,6 +279,9 @@ class ReportWriter:
                     attempt.failure_summary,
                     attempt.reflective_summary,
                     attempt.failure_analysis,
+                    attempt.created_test_count,
+                    attempt.successful_test_count,
+                    attempt.candidate_count,
                 ]
             )
 
@@ -286,6 +295,9 @@ class ReportWriter:
                     row.status,
                     row.compile_success,
                     row.pass_rate,
+                    row.test_success_ratio,
+                    row.created_test_count,
+                    row.successful_test_count,
                     row.coverage_delta,
                     row.missed_line_reduction,
                     row.forbidden_edit_rate,

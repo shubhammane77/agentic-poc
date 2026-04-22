@@ -27,7 +27,10 @@ class ToolContext:
     subagent_id: str | None = None
     active_worktree: Path | None = None
     written_files: list[str] = field(default_factory=list)
+    written_file_test_counts: dict[str, int] = field(default_factory=dict)
+    last_written_test_method_count: int = 0
     last_single_test_exit_code: int | None = None
+    last_single_test_executed_count: int = 0
     last_single_test_passing_count: int = 0
     last_project_test_exit_code: int | None = None
 
@@ -45,18 +48,63 @@ _FOLDER_STRUCTURE_IGNORED_DIRS = {
     "generated-resorruces",
     "node_modules",
 }
+
+
+def _is_junit_method_annotation(line: str) -> bool:
+    stripped = line.strip()
+    if not stripped.startswith("@"):
+        return False
+    token = stripped[1:].split("(", 1)[0].strip()
+    if not token:
+        return False
+    return token.split(".")[-1] in _JUNIT_METHOD_ANNOTATIONS
+
+
+def _count_declared_junit_tests(content: str) -> int:
+    count = 0
+    pending_annotation = False
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("//"):
+            continue
+        if _is_junit_method_annotation(stripped):
+            pending_annotation = True
+            continue
+        if pending_annotation and stripped.startswith("@"):
+            continue
+        if pending_annotation and _looks_like_java_method_declaration(stripped):
+            count += 1
+            pending_annotation = False
+            continue
+        pending_annotation = False
+    return count
+
+
+def _looks_like_java_method_declaration(line: str) -> bool:
+    if "(" not in line or ")" not in line:
+        return False
+    if ";" in line:
+        return False
+    disallowed = ("class ", "interface ", "enum ", "record ", "if ", "for ", "while ", "switch ", "catch ")
+    if any(token in line for token in disallowed):
+        return False
+    before_paren = line.split("(", 1)[0].strip()
+    if not before_paren:
+        return False
+    return " " in before_paren
 _FOLDER_STRUCTURE_MAX_DEPTH = 20
 
 
-def _count_passing_tests(output: str, module_root: Path, class_name: str) -> int:
-    """Return number of passing test cases for class_name.
+def _parse_test_counts(output: str, module_root: Path, class_name: str) -> tuple[int, int]:
+    """Return executed/passing test counts for class_name.
 
     Tries stdout/stderr first (available when tests fail or -q is absent),
     then falls back to the surefire XML report (always written on disk).
     """
     for m in _TESTS_RUN_RE.finditer(output):
         run, failures, errors, skipped = (int(m.group(i)) for i in range(1, 5))
-        return max(0, run - failures - errors - skipped)
+        passing = max(0, run - failures - errors - skipped)
+        return run, passing
 
     # -q suppresses the summary line when all tests pass; parse the XML instead
     for xml_path in (module_root / "target" / "surefire-reports").glob(f"TEST-*{class_name}*.xml"):
@@ -67,10 +115,11 @@ def _count_passing_tests(output: str, module_root: Path, class_name: str) -> int
                 m = re.search(r'tests="(\d+)".*?failures="(\d+)".*?errors="(\d+)".*?skipped="(\d+)"', text)
             if m:
                 run, failures, errors, skipped = (int(m.group(i)) for i in range(1, 5))
-                return max(0, run - failures - errors - skipped)
+                passing = max(0, run - failures - errors - skipped)
+                return run, passing
         except OSError:
             continue
-    return 0
+    return 0, 0
 
 
 def remove_merge_blockers(clone_path: Path) -> None:
@@ -243,11 +292,15 @@ class SafeToolset:
                 raise ValueError(f"Refusing to overwrite existing file: {file_path}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
+            created_test_count = _count_declared_junit_tests(content)
+            self.context.last_written_test_method_count = created_test_count
+            self.context.written_file_test_counts[relative] = created_test_count
             if relative not in self.context.written_files:
                 self.context.written_files.append(relative)
             step["summary"] = f"Wrote {relative}"
             step["resolved_path"] = str(target)
             step["allowed_test_tree"] = "src/test/java"
+            step["created_test_count"] = created_test_count
             return relative
 
     def create_worktree(self, worktree_path: str, branch_name: str) -> str:
@@ -338,21 +391,27 @@ class SafeToolset:
                 f"{self.context.subagent_id or 'run'}-{class_name}-single-test",
                 result,
             )
-            self.context.last_single_test_exit_code = result.exit_code
-            self.context.last_single_test_passing_count = _count_passing_tests(
+            executed_count, passing_count = _parse_test_counts(
                 result.stdout + "\n" + result.stderr, module_root, class_name
             )
+            self.context.last_single_test_exit_code = result.exit_code
+            self.context.last_single_test_executed_count = executed_count
+            self.context.last_single_test_passing_count = passing_count
             step["summary"] = f"Ran {class_name}"
             step["resolved_path"] = str(target)
             step["module_root"] = str(module_root)
             step["command"] = sanitize_command(cmd)
             step["exit_code"] = result.exit_code
+            step["executed_count"] = self.context.last_single_test_executed_count
             step["passing_count"] = self.context.last_single_test_passing_count
             step["stdout_preview"] = result.stdout[:500]
             step["stderr_preview"] = result.stderr[:500]
             step["maven_log_paths"] = log_paths
             if result.ok:
-                return f"success: single test {class_name} passed ({self.context.last_single_test_passing_count} passing)"
+                return (
+                    f"success: single test {class_name} passed "
+                    f"({self.context.last_single_test_passing_count}/{self.context.last_single_test_executed_count} passing)"
+                )
             return (result.stdout + "\n" + result.stderr).strip()
 
     def run_project_tests_with_coverage(self) -> str:

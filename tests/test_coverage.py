@@ -3,9 +3,9 @@ from pathlib import Path
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.config import AppConfig
-from agentic_testgen.coverage import CoverageAnalyzer
-from agentic_testgen.models import CoverageRecord, GlobalCoverageSummary
+from agentic_testgen.core.config import AppConfig
+from agentic_testgen.analysis.coverage import CoverageAnalyzer
+from agentic_testgen.core.models import CoverageRecord, GlobalCoverageSummary
 
 
 FIXTURE_ROOT = Path("tests/fixtures/repos/simple-service")
