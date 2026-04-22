@@ -5,8 +5,8 @@ from zipfile import ZipFile
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.models import CoverageComparison, GlobalCoverageSummary, RepoContext
-from agentic_testgen.reporting import ReportWriter
+from agentic_testgen.core.models import CoverageComparison, GlobalCoverageSummary, RepoContext
+from agentic_testgen.analysis.reporting import ReportWriter
 
 
 class ReportingTests(unittest.TestCase):

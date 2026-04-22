@@ -49,6 +49,9 @@ cp .env.example .env
 - optional `REPO_PATH` (used when `--repo-path` is omitted)
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
+- optional `TEMPERATURE`
+- optional `TOP_P`
+- optional `MAX_TOKENS`
 - `MODEL_API_KEY`
 - optional `MODEL_API_BASE`
 - optional `WORKSPACE_ROOT`
@@ -186,10 +189,15 @@ Copy the values you need into `.env` or export them directly:
 - `MAX_FILES_PER_RUN=5`
 - `MODEL_PROVIDER`
 - `MODEL_NAME`
+- `TEMPERATURE`
+- `TOP_P`
+- `MAX_TOKENS`
 - `MODEL_API_KEY`
 - `MODEL_API_BASE`
 - `MAX_PARALLEL_SUBAGENTS`
 - `MAX_SUBAGENT_ITERATIONS`
+- `MAX_REACT_ITERS_SUBAGENT`
+- `MAX_REACT_ITERS_DADDY`
 - `AUTO_INTEGRATE_SUCCESSFUL_WORKTREES`
 - `WORKSPACE_ROOT`
 - `MLFLOW_TRACKING_URI=http://127.0.0.1:5000`

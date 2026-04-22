@@ -17,6 +17,8 @@ class ModelSettings:
     api_key: str = ""
     api_base: str = ""
     temperature: float = 0.0
+    top_p: float = 1.0
+    max_tokens: int | None = None
 
     @property
     def configured(self) -> bool:
@@ -53,6 +55,8 @@ class AppConfig:
     max_files_per_run: int = 5
     max_parallel_subagents: int = 2
     max_subagent_iterations: int = 3
+    max_react_iters_subagent: int = 6
+    max_react_iters_daddy: int = 4
     auto_integrate_successful_worktrees: bool = False
     workspace_root: Path = field(default_factory=workspace_default_root)
     model: ModelSettings = field(default_factory=ModelSettings)
@@ -74,6 +78,8 @@ class AppConfig:
             max_files_per_run=int_from_env(os.getenv("MAX_FILES_PER_RUN"), 5),
             max_parallel_subagents=int_from_env(os.getenv("MAX_PARALLEL_SUBAGENTS"), 2),
             max_subagent_iterations=int_from_env(os.getenv("MAX_SUBAGENT_ITERATIONS"), 3),
+            max_react_iters_subagent=int_from_env(os.getenv("MAX_REACT_ITERS_SUBAGENT"), 6),
+            max_react_iters_daddy=int_from_env(os.getenv("MAX_REACT_ITERS_DADDY"), 4),
             auto_integrate_successful_worktrees=bool_from_env(
                 os.getenv("AUTO_INTEGRATE_SUCCESSFUL_WORKTREES"),
                 default=False,
@@ -85,6 +91,12 @@ class AppConfig:
                 api_key=os.getenv("MODEL_API_KEY", "").strip(),
                 api_base=os.getenv("MODEL_API_BASE", "").strip(),
                 temperature=float_from_env(os.getenv("TEMPERATURE"), 0.0),
+                top_p=float_from_env(os.getenv("TOP_P"), 1.0),
+                max_tokens=(
+                    int(value)
+                    if (value := os.getenv("MAX_TOKENS", "").strip())
+                    else None
+                ),
             ),
             mlflow=MlflowSettings(
                 tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000").strip(),

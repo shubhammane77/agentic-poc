@@ -101,6 +101,9 @@ class AttemptRecord:
     failure_summary: str
     reflective_summary: str
     failure_analysis: str = ""
+    created_test_count: int = 0
+    successful_test_count: int = 0
+    candidate_count: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return _jsonify(self)
@@ -231,6 +234,9 @@ class ModelEvalResult:
     tool_call_count: int
     iteration_count: int
     estimated_cost: float
+    test_success_ratio: float = 0.0
+    created_test_count: int = 0
+    successful_test_count: int = 0
     run_id: str | None = None
     error_message: str = ""
 

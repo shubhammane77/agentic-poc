@@ -2,7 +2,7 @@ import unittest
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.logging import SecretRedactor
+from agentic_testgen.core.logging import SecretRedactor
 
 
 class SecretRedactorTests(unittest.TestCase):

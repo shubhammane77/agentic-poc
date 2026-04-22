@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-try:
-    import dspy
-except ImportError:  # pragma: no cover - optional runtime dependency
-    dspy = None  # type: ignore[assignment]
-
 from agentic_testgen.execution.checkpointing import CheckpointStore
 from agentic_testgen.core.config import AppConfig
 from agentic_testgen.analysis.coverage import CoverageAnalyzer, summarize_tree
 from agentic_testgen.analysis.coverage_comparison import CoverageComparator
+from agentic_testgen.agents.custom_react import CustomReAct
 from agentic_testgen.agents.dspy_runtime import DSPyRuntime
 from agentic_testgen.integrations.gitlab import GitLabRepositoryManager
 from agentic_testgen.core.logging import RunLogger
@@ -653,7 +649,11 @@ class DaddySubagentsReflectiveWorkflow:
             "Use the read/search tools as needed and summarize the best testing opportunities."
         )
         try:
-            react = dspy.ReAct("objective -> answer", tools=toolset.build_repo_dspy_tools(), max_iters=4)
+            react = CustomReAct(
+                "objective -> answer",
+                tools=toolset.build_repo_dspy_tools(),
+                max_iters=self.config.max_react_iters_daddy,
+            )
             prediction = react(objective=objective)
             tracer.tag_last_trace(
                 {

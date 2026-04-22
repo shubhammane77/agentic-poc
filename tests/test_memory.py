@@ -4,14 +4,14 @@ from pathlib import Path
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig, MlflowSettings
-from agentic_testgen.models import CoverageRecord
-from agentic_testgen.utils import CommandResult, read_json
+from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.core.config import AppConfig, MlflowSettings
+from agentic_testgen.core.models import CoverageRecord
+from agentic_testgen.core.utils import CommandResult, read_json
 
 
 class MemoryTests(unittest.TestCase):
-    def test_run_writes_memory_and_global_memory(self) -> None:
+    def test_run_writes_memory_and_project_memory(self) -> None:
         fixture = Path("tests/fixtures/repos/simple-service")
         with tempfile.TemporaryDirectory() as tmpdir:
             config = AppConfig(
@@ -37,24 +37,23 @@ class MemoryTests(unittest.TestCase):
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
 
             memory_path = result.repo_context.workspace_root / "artifacts" / "memory.json"
-            global_memory_path = Path(tmpdir) / "global_memory.json"
+            repo_key = f"{result.repo_context.repo_name}::{result.repo_context.repo_url}"
+            project_key = repo_key.replace("/", "_").replace(":", "_")
+            project_memory_path = Path(tmpdir) / "memory" / f"{project_key}.json"
 
             self.assertTrue(memory_path.exists())
-            self.assertTrue(global_memory_path.exists())
+            self.assertTrue(project_memory_path.exists())
 
             run_memory = read_json(memory_path, default={})
-            global_memory = read_json(global_memory_path, default={})
+            project_memory = read_json(project_memory_path, default={})
 
             self.assertGreaterEqual(len(run_memory.get("entries", [])), 1)
             failed_entries = [entry for entry in run_memory.get("entries", []) if entry.get("status") != "passed"]
             self.assertGreaterEqual(len(failed_entries), 1)
             self.assertGreaterEqual(len(failed_entries[0].get("failure_feedback", [])), 1)
-            self.assertIn("repos", global_memory)
-            repo_entries = list(global_memory["repos"].values())
-            self.assertEqual(1, len(repo_entries))
             failed_lessons = [
                 item.get("lesson")
-                for item in repo_entries[0].get("lessons", [])
+                for item in project_memory.get("lessons", [])
                 if item.get("status") == "failed"
             ]
             self.assertGreaterEqual(len(failed_lessons), 1)

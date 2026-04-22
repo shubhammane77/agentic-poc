@@ -4,10 +4,10 @@ import tempfile
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.agents import DaddySubagentsReflectiveWorkflow
-from agentic_testgen.config import AppConfig, MlflowSettings
-from agentic_testgen.models import FileWorkItem, IntegrationDecision
-from agentic_testgen.workspace import WorkspaceManager
+from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.core.config import AppConfig, MlflowSettings
+from agentic_testgen.core.models import FileWorkItem, IntegrationDecision
+from agentic_testgen.execution.workspace import WorkspaceManager
 
 
 class BatchingTests(unittest.TestCase):
