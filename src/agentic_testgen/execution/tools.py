@@ -35,6 +35,17 @@ class ToolContext:
 _TESTS_RUN_RE = re.compile(
     r"Tests run:\s*(\d+),\s*Failures:\s*(\d+),\s*Errors:\s*(\d+),\s*Skipped:\s*(\d+)"
 )
+_JUNIT_METHOD_ANNOTATIONS = {"Test", "ParameterizedTest", "RepeatedTest", "TestFactory", "TestTemplate"}
+_FOLDER_STRUCTURE_IGNORED_DIRS = {
+    ".git",
+    "target",
+    "build",
+    "out",
+    "generated-resources",
+    "generated-resorruces",
+    "node_modules",
+}
+_FOLDER_STRUCTURE_MAX_DEPTH = 20
 
 
 def _count_passing_tests(output: str, module_root: Path, class_name: str) -> int:
@@ -136,25 +147,64 @@ class SafeToolset:
             step["resolved_path"] = str(target)
             return relative
 
-    def read_folder_structure(self, folder_path: str = ".", max_depth: int = 3) -> str:
+    def read_folder_structure(self, folder_path: str = ".") -> str:
         with self.context.logger.step(
             "tool.read_folder_structure",
             subagent_id=self.context.subagent_id,
             file_path=folder_path,
-            details={"folder_path": folder_path, "max_depth": max_depth},
+            details={"folder_path": folder_path},
         ) as step:
             root = self._resolve_active_path(folder_path)
-            lines: list[str] = []
+            entries: list[tuple[tuple[str, ...], bool]] = []
             for path in sorted(root.rglob("*")):
-                depth = len(path.relative_to(root).parts)
-                if depth > max_depth:
+                relative = path.relative_to(root)
+                if any(part in _FOLDER_STRUCTURE_IGNORED_DIRS for part in relative.parts):
                     continue
-                lines.append(str(path.relative_to(root)))
-            summary = "\n".join(lines[:500])
+                depth = len(relative.parts)
+                if depth > _FOLDER_STRUCTURE_MAX_DEPTH:
+                    continue
+                entries.append((relative.parts, path.is_dir()))
+            preview_entries = entries[:500]
+
+            tree: dict[str, dict | None] = {}
+            for parts, is_dir in preview_entries:
+                node = tree
+                for index, part in enumerate(parts):
+                    is_last = index == len(parts) - 1
+                    key = f"{part}/" if (not is_last or is_dir) else part
+                    existing = node.get(key)
+                    if is_last:
+                        if key not in node:
+                            node[key] = {} if is_dir else None
+                        elif isinstance(existing, dict) and not is_dir:
+                            # Keep richer directory node if both were seen.
+                            node[key] = existing
+                        break
+                    if not isinstance(existing, dict):
+                        existing = {}
+                        node[key] = existing
+                    node = existing
+
+            summary = "[]"
+            if preview_entries:
+                def _render_yaml(node: dict[str, dict | None], indent: int = 0) -> list[str]:
+                    lines: list[str] = []
+                    prefix = "  " * indent
+                    for key in sorted(node):
+                        value = node[key]
+                        if isinstance(value, dict):
+                            lines.append(f"{prefix}{key}:")
+                            if value:
+                                lines.extend(_render_yaml(value, indent + 1))
+                        else:
+                            lines.append(f"{prefix}{key}:")
+                    return lines
+
+                summary = "\n".join(_render_yaml(tree))
             step["summary"] = f"Listed {root.relative_to(self.active_root_resolved)}"
             step["resolved_path"] = str(root)
-            step["entry_count"] = len(lines)
-            step["preview"] = lines[:20]
+            step["entry_count"] = len(entries)
+            step["preview"] = ["/".join(parts) + ("/" if is_dir else "") for parts, is_dir in preview_entries[:20]]
             return summary
 
     def search_occurrences(self, query: str, folder_path: str = ".") -> str:
