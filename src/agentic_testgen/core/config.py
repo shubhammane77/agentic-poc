@@ -56,7 +56,8 @@ class AppConfig:
     max_parallel_subagents: int = 2
     max_subagent_iterations: int = 3
     max_react_iters_subagent: int = 6
-    max_react_iters_daddy: int = 4
+    max_react_iters_orchestrator: int = 4
+    max_react_iters_analysis: int = 10
     auto_integrate_successful_worktrees: bool = False
     workspace_root: Path = field(default_factory=workspace_default_root)
     model: ModelSettings = field(default_factory=ModelSettings)
@@ -79,7 +80,8 @@ class AppConfig:
             max_parallel_subagents=int_from_env(os.getenv("MAX_PARALLEL_SUBAGENTS"), 2),
             max_subagent_iterations=int_from_env(os.getenv("MAX_SUBAGENT_ITERATIONS"), 3),
             max_react_iters_subagent=int_from_env(os.getenv("MAX_REACT_ITERS_SUBAGENT"), 6),
-            max_react_iters_daddy=int_from_env(os.getenv("MAX_REACT_ITERS_DADDY"), 4),
+            max_react_iters_orchestrator=int_from_env(os.getenv("MAX_REACT_ITERS_ORCHESTRATOR"), 4),
+            max_react_iters_analysis=int_from_env(os.getenv("MAX_REACT_ITERS_ANALYSIS"), 8),
             auto_integrate_successful_worktrees=bool_from_env(
                 os.getenv("AUTO_INTEGRATE_SUCCESSFUL_WORKTREES"),
                 default=False,

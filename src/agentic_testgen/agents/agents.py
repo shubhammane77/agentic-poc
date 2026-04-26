@@ -7,7 +7,6 @@ from agentic_testgen.execution.checkpointing import CheckpointStore
 from agentic_testgen.core.config import AppConfig
 from agentic_testgen.analysis.coverage import CoverageAnalyzer, summarize_tree
 from agentic_testgen.analysis.coverage_comparison import CoverageComparator
-from agentic_testgen.agents.custom_react import CustomReAct
 from agentic_testgen.agents.dspy_runtime import DSPyRuntime
 from agentic_testgen.integrations.gitlab import GitLabRepositoryManager
 from agentic_testgen.core.logging import RunLogger
@@ -18,7 +17,6 @@ from agentic_testgen.core.models import (
     CoverageRecord,
     FileWorkItem,
     GlobalCoverageSummary,
-    IntegrationDecision,
     ModelDefinition,
     RepoContext,
     RunCheckpoint,
@@ -27,14 +25,13 @@ from agentic_testgen.core.models import (
 )
 from agentic_testgen.analysis.reporting import ReportWriter
 from agentic_testgen.agents.subagent_dispatcher import SubagentDispatcher
-from agentic_testgen.execution.tools import SafeToolset, ToolContext
 from agentic_testgen.integrations.gitlab import sanitize_repo_url
 from agentic_testgen.integrations.tracing import MlflowTracer
 from agentic_testgen.core.utils import ensure_dir, new_run_id, prompt_hash, run_command, slugify, utc_timestamp, write_json
 from agentic_testgen.execution.workspace import RunWorkspace, WorkspaceManager
 
 
-class DaddySubagentsReflectiveWorkflow:
+class OrchestratorWorkflow:
     def __init__(self, config: AppConfig):
         self.config = config
         self.workspace_manager = WorkspaceManager(config.workspace_root)
@@ -61,7 +58,7 @@ class DaddySubagentsReflectiveWorkflow:
         tracer.configure()
         with tracer.run(
             f"workflow-{run_id}",
-            tags={"workflow": "daddy_subagents_reflective", "source_type": "gitlab", "run_id": run_id},
+            tags={"workflow": "orchestrator_reflective", "source_type": "gitlab", "run_id": run_id},
         ):
             tracer.log_params({"repo_url": repo_url, "repo_name": repo_name, "run_id": run_id})
             manager = GitLabRepositoryManager(self.config, logger)
@@ -102,7 +99,7 @@ class DaddySubagentsReflectiveWorkflow:
         tracer.configure()
         with tracer.run(
             f"workflow-{run_id}",
-            tags={"workflow": "daddy_subagents_reflective", "source_type": "fixture", "run_id": run_id},
+            tags={"workflow": "orchestrator_reflective", "source_type": "fixture", "run_id": run_id},
         ):
             tracer.log_params({"repo_source": str(repo_path), "repo_name": repo_name, "run_id": run_id})
             with logger.step("fixture.copy", details={"source": str(repo_path)}) as step:
@@ -160,7 +157,7 @@ class DaddySubagentsReflectiveWorkflow:
         self.memory.initialize_run_memory(self._run_memory_path(workspace), repo_context)
         with tracer.run(
             f"workflow-resume-{run_id}",
-            tags={"workflow": "daddy_subagents_reflective", "source_type": repo_context.source_type, "run_id": run_id},
+            tags={"workflow": "orchestrator_reflective", "source_type": repo_context.source_type, "run_id": run_id},
         ):
             tracer.log_params({"run_id": run_id, "resume": True})
             new_results = self._dispatcher.dispatch(
@@ -256,8 +253,8 @@ class DaddySubagentsReflectiveWorkflow:
             tracer.tag_last_trace(
                 {
                     "run_id": run_id,
-                    "workflow": "daddy_subagents_reflective",
-                    "dspy_call": "daddy.overview",
+                    "workflow": "orchestrator_reflective",
+                    "dspy_call": "orchestrator.overview",
                     "source_type": source_type,
                     "repo_name": repo_name,
                 }
@@ -285,7 +282,7 @@ class DaddySubagentsReflectiveWorkflow:
             coverage_result, coverage_records, maven_log_paths = self.coverage.run_tests_with_coverage(
                 repo_root,
                 maven_logs_dir=workspace.logs_dir / "maven",
-                log_prefix="daddy-project-coverage",
+                log_prefix="orchestrator-project-coverage",
             )
             baseline_summary = self.coverage.summarize_global_coverage(coverage_records)
             work_items = self.coverage.build_work_items(coverage_records)
@@ -303,8 +300,6 @@ class DaddySubagentsReflectiveWorkflow:
             coverage_records,
             work_items,
         )
-        if runtime.enabled:
-            self._run_daddy_react(repo_context, workspace, logger, runtime, tracer, work_items)
         checkpoint_store.build_and_save(
             repo_context,
             phase="coverage_completed",
@@ -624,58 +619,6 @@ class DaddySubagentsReflectiveWorkflow:
         )
         return token_budget_path
 
-    def _run_daddy_react(
-        self,
-        repo_context: RepoContext,
-        workspace: RunWorkspace,
-        logger: RunLogger,
-        runtime: DSPyRuntime,
-        tracer: MlflowTracer,
-        work_items: list[FileWorkItem],
-    ) -> None:
-        toolset = SafeToolset(
-            ToolContext(
-                run_id=repo_context.run_id,
-                repo_root=repo_context.clone_path,
-                clone_root=repo_context.clone_path,
-                worktrees_root=workspace.worktrees_dir,
-                config=self.config,
-                logger=logger,
-                subagent_id="daddy",
-            )
-        )
-        objective = (
-            "Analyze the repository and confirm the highest-value source files for new test generation.\n"
-            f"Top candidates: {[item.file_path for item in work_items[:5]]}\n"
-            "Use the read/search tools as needed and summarize the best testing opportunities."
-        )
-        try:
-            react = CustomReAct(
-                "objective -> answer",
-                tools=toolset.build_repo_dspy_tools(),
-                max_iters=self.config.max_react_iters_daddy,
-            )
-            prediction = react(objective=objective)
-            tracer.tag_last_trace(
-                {
-                    "run_id": repo_context.run_id,
-                    "workflow": "daddy_subagents_reflective",
-                    "dspy_call": "daddy.react",
-                    "subagent_id": "daddy",
-                }
-            )
-            logger.log_trace(
-                {
-                    "run_id": repo_context.run_id,
-                    "subagent_id": "daddy",
-                    "objective": objective,
-                    "trajectory": getattr(prediction, "trajectory", {}),
-                    "answer": getattr(prediction, "answer", str(prediction)),
-                }
-            )
-        except Exception as exc:
-            logger.log_event("daddy.react", "failed", summary=str(exc))
-
     def _refresh_reports_from_checkpoint(
         self,
         *,
@@ -707,27 +650,6 @@ class DaddySubagentsReflectiveWorkflow:
 
     def _pause_requested(self, workspace: RunWorkspace) -> bool:
         return (workspace.control_dir / "pause.requested").exists()
-
-    # Delegation shims — keep backward compatibility for tests and external callers
-    def _sort_integrations(self, decisions: list[IntegrationDecision]) -> list[IntegrationDecision]:
-        return self._dispatcher._sort_integrations(decisions)
-
-    def _dedupe_work_items(
-        self,
-        work_items: list[FileWorkItem],
-        *,
-        exclude_files: set[str] | None = None,
-    ) -> list[FileWorkItem]:
-        return self._dispatcher._dedupe_work_items(work_items, exclude_files=exclude_files)
-
-    def _append_integration(self, workspace: RunWorkspace, decision: IntegrationDecision) -> None:
-        self._dispatcher._append_integration(workspace, decision)
-
-    def _read_pending_integrations(self, workspace: RunWorkspace) -> list[IntegrationDecision]:
-        return self._dispatcher.read_pending_integrations(workspace)
-
-    def _subagent_objective(self, *args, **kwargs) -> str:
-        return self._dispatcher._subagent_objective(*args, **kwargs)
 
     def _build_logger(self, run_id: str, workspace: RunWorkspace) -> RunLogger:
         return RunLogger(run_id, workspace.logs_dir, secrets=[self.config.gitlab_token, self.config.model.api_key])

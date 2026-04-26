@@ -170,6 +170,15 @@ class SafeToolset:
         return False
 
     def read_file(self, file_path: str) -> str:
+        """Read the full text content of a source file.
+
+        Args:
+            file_path: Absolute path to the file
+                (e.g. /home/user/project/src/main/java/Foo.java on Unix or
+                C:\\Users\\user\\project\\src\\main\\java\\Foo.java on Windows).
+                Relative paths are resolved against the active repository root,
+                but absolute paths are strongly preferred.
+        """
         with self.context.logger.step(
             "tool.read_file",
             subagent_id=self.context.subagent_id,
@@ -184,6 +193,14 @@ class SafeToolset:
             return content
 
     def search_file(self, file_path: str) -> str:
+        """Resolve a file path and return its path relative to the repository root.
+
+        Args:
+            file_path: Absolute path to the file to locate
+                (e.g. /home/user/project/src/main/java/Foo.java).
+                Must be an absolute path; relative paths are resolved against
+                the active repository root.
+        """
         with self.context.logger.step(
             "tool.search_file",
             subagent_id=self.context.subagent_id,
@@ -197,6 +214,16 @@ class SafeToolset:
             return relative
 
     def read_folder_structure(self, folder_path: str = ".") -> str:
+        """Return a YAML tree of the folder's contents (ignores build artifacts).
+
+        Args:
+            folder_path: Absolute path to the folder to list
+                (e.g. /home/user/project/src on Unix or
+                C:\\Users\\user\\project\\src on Windows).
+                Defaults to the active repository root when omitted.
+                Relative paths are resolved against the active repository root,
+                but absolute paths are strongly preferred.
+        """
         with self.context.logger.step(
             "tool.read_folder_structure",
             subagent_id=self.context.subagent_id,
@@ -257,6 +284,16 @@ class SafeToolset:
             return summary
 
     def search_occurrences(self, query: str, folder_path: str = ".") -> str:
+        """Search for a text pattern (ripgrep / grep) across a folder tree.
+
+        Args:
+            query: The text or regex pattern to search for.
+            folder_path: Absolute path to the folder to search
+                (e.g. /home/user/project/src).
+                Defaults to the active repository root when omitted.
+                Relative paths are resolved against the active repository root,
+                but absolute paths are strongly preferred.
+        """
         with self.context.logger.step(
             "tool.search_occurrences",
             subagent_id=self.context.subagent_id,
@@ -278,6 +315,20 @@ class SafeToolset:
             return output[:5000]
 
     def write_new_test_file(self, file_path: str, content: str) -> str:
+        """Write a new Java test file inside the src/test/java tree.
+
+        Only files under src/test/java are permitted.  The file must not already
+        exist unless it was written by this agent in the current session.
+
+        Args:
+            file_path: Absolute path where the test file should be written
+                (e.g. /home/user/project/src/test/java/com/example/FooTest.java).
+                Must be an absolute path; a valid absolute Unix path starts with /
+                and a valid absolute Windows path starts with a drive letter
+                (e.g. C:\\).  If a relative path is given it is resolved against
+                the active repository root.
+            content: Full Java source code for the test class.
+        """
         with self.context.logger.step(
             "tool.write_new_test_file",
             subagent_id=self.context.subagent_id,
@@ -367,6 +418,16 @@ class SafeToolset:
             return commit_hash
 
     def run_single_test(self, test_file_path: str) -> str:
+        """Run a single JUnit test class using Maven and return the output.
+
+        Args:
+            test_file_path: Absolute path to the .java test file to execute
+                (e.g. /home/user/project/src/test/java/com/example/FooTest.java).
+                Must be an absolute path; a valid absolute Unix path starts with /
+                and a valid absolute Windows path starts with a drive letter
+                (e.g. C:\\).  If a relative path is given it is resolved against
+                the active repository root.
+        """
         with self.context.logger.step(
             "tool.run_single_test",
             subagent_id=self.context.subagent_id,
@@ -463,4 +524,24 @@ class SafeToolset:
             dspy.Tool(self.search_occurrences),
             dspy.Tool(self.search_file),
             dspy.Tool(self.run_project_tests_with_coverage),
+        ]
+
+    def build_analysis_dspy_tools(self) -> list[dspy.Tool]:
+        """Read-only tools for RepoAnalysisAgent."""
+        if dspy is None:
+            raise RuntimeError("DSPy is not installed.")
+        return [
+            dspy.Tool(self.read_file),
+            dspy.Tool(self.read_folder_structure),
+            dspy.Tool(self.search_occurrences),
+            dspy.Tool(self.search_file),
+        ]
+
+    def build_writing_dspy_tools(self) -> list[dspy.Tool]:
+        """Write and run tools for TestWritingAgent."""
+        if dspy is None:
+            raise RuntimeError("DSPy is not installed.")
+        return [
+            dspy.Tool(self.write_new_test_file),
+            dspy.Tool(self.run_single_test),
         ]

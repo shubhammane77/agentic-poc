@@ -4,7 +4,7 @@ from pathlib import Path
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.agents.agents import OrchestratorWorkflow
 from agentic_testgen.core.config import AppConfig, MlflowSettings
 from agentic_testgen.core.models import CoverageRecord
 from agentic_testgen.core.utils import CommandResult, read_json
@@ -19,7 +19,7 @@ class MemoryTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             workflow.coverage.run_tests_with_coverage = lambda *args, **kwargs: (
                 CommandResult(args=["mvn"], exit_code=0, stdout="", stderr="", duration_seconds=0.01),
                 [

@@ -9,7 +9,7 @@ except ImportError:  # pragma: no cover - optional runtime dependency
 
 from agentic_testgen.core.config import AppConfig
 from agentic_testgen.core.logging import RunLogger
-from agentic_testgen.core.models import ModelDefinition
+from agentic_testgen.core.models import AnalysisSummary, ModelDefinition
 
 
 class DSPyRuntime:

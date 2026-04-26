@@ -87,6 +87,65 @@ class FileWorkItem:
 
 
 @dataclass
+class AnalysisSummary:
+    """Structured handoff from RepoAnalysisAgent to TestWritingAgent.
+
+    JSON fields (class_signatures, existing_test_patterns, coverage_gaps,
+    few_shot_examples) match the inter-agent protocol spec.
+    """
+
+    class_signatures: str = ""
+    dependencies: str = ""
+    existing_test_patterns: str = ""
+    coverage_gaps: str = ""
+    few_shot_examples: str = ""
+
+    def to_context(self) -> str:
+        parts = []
+        if self.class_signatures:
+            parts.append(f"## Class Signatures\n{self.class_signatures}")
+        if self.dependencies:
+            parts.append(f"## Dependencies\n{self.dependencies}")
+        if self.existing_test_patterns:
+            parts.append(f"## Existing Test Patterns\n{self.existing_test_patterns}")
+        if self.coverage_gaps:
+            parts.append(f"## Coverage Gaps\n{self.coverage_gaps}")
+        if self.few_shot_examples:
+            parts.append(f"## Few-Shot Examples\n{self.few_shot_examples}")
+        return "\n\n".join(parts) if parts else "No analysis available."
+
+    def to_json(self) -> dict[str, Any]:
+        return _jsonify(self)
+
+
+@dataclass
+class FailureAnalysisMessage:
+    """Structured handoff from TestWritingAgent back to RepoAnalysisAgent on failure.
+
+    JSON fields (failed_test_name, error_message, suspected_cause,
+    requested_reanalysis) match the inter-agent protocol spec.
+    """
+
+    failed_test_name: str
+    error_message: str
+    suspected_cause: str
+    requested_reanalysis: str = ""
+
+    def to_context(self) -> str:
+        parts = [
+            f"## Failed Test\n{self.failed_test_name}",
+            f"## Error\n{self.error_message}",
+            f"## Suspected Cause\n{self.suspected_cause}",
+        ]
+        if self.requested_reanalysis:
+            parts.append(f"## Requested Re-analysis\n{self.requested_reanalysis}")
+        return "\n\n".join(parts)
+
+    def to_json(self) -> dict[str, Any]:
+        return _jsonify(self)
+
+
+@dataclass
 class AttemptRecord:
     run_id: str
     subagent_id: str

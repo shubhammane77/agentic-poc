@@ -7,7 +7,7 @@ from statistics import mean, median
 from dataclasses import dataclass
 from pathlib import Path
 
-from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.agents.agents import OrchestratorWorkflow
 from agentic_testgen.core.config import AppConfig
 from agentic_testgen.core.logging import RunLogger
 from agentic_testgen.core.models import ModelDefinition, ModelEvalCase, ModelEvalResult, RepoContext
@@ -54,7 +54,7 @@ class ModelMatrixEvaluator:
 
     def run(self, config_path: Path) -> list[ModelEvalResult]:
         evaluation_config = EvaluationConfig.load(config_path)
-        workflow = DaddySubagentsReflectiveWorkflow(self.config)
+        workflow = OrchestratorWorkflow(self.config)
         results: list[ModelEvalResult] = []
         for model in evaluation_config.models:
             if not os.getenv(model.api_key_env):

@@ -5,7 +5,8 @@ from unittest.mock import MagicMock, patch
 
 import tests._path_setup  # noqa: F401
 
-from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.agents.agents import OrchestratorWorkflow
+from agentic_testgen.agents.subagent_dispatcher import SubagentDispatcher
 from agentic_testgen.core.config import AppConfig, MlflowSettings
 from agentic_testgen.core.models import CoverageRecord, FileWorkItem, RepoContext
 from agentic_testgen.core.utils import CommandResult
@@ -20,7 +21,7 @@ class WorkflowTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             workflow.coverage.run_tests_with_coverage = lambda *args, **kwargs: (
                 CommandResult(args=["mvn"], exit_code=0, stdout="", stderr="", duration_seconds=0.01),
                 [
@@ -49,7 +50,7 @@ class WorkflowTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             result = workflow.run_from_local_path(fixture, source_name="simple-service")
             comparison = workflow.rerun_after_merge_coverage(result.run_id)
             self.assertIsNotNone(comparison)
@@ -58,7 +59,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(0.0, comparison.percentage_increase)
 
     def test_subagent_objective_avoids_framework_specific_guidance(self) -> None:
-        workflow = DaddySubagentsReflectiveWorkflow(AppConfig(mlflow=MlflowSettings(enabled=False)))
+        dispatcher = SubagentDispatcher(AppConfig(mlflow=MlflowSettings(enabled=False)), None, None)
         repo_context = RepoContext(
             run_id="run_123",
             repo_url="https://gitlab.example.com/group/project.git",
@@ -74,7 +75,7 @@ class WorkflowTests(unittest.TestCase):
             missed_lines=6,
             missed_line_numbers=[10, 11, 15],
         )
-        objective = workflow._subagent_objective(
+        objective = dispatcher._subagent_objective(
             repo_context,
             item,
             "/tmp/project/src/test/java/com/example/LegacyServiceGeneratedTestIter1.java",
@@ -97,7 +98,7 @@ class WorkflowTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             expected_result = MagicMock(name="workflow-result")
 
             with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(
@@ -137,7 +138,7 @@ class WorkflowTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             expected_result = MagicMock(name="workflow-result")
 
             with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(
@@ -163,7 +164,7 @@ class WorkflowTests(unittest.TestCase):
                 workspace_root=Path(tmpdir),
                 mlflow=MlflowSettings(enabled=False),
             )
-            workflow = DaddySubagentsReflectiveWorkflow(config)
+            workflow = OrchestratorWorkflow(config)
             expected_result = MagicMock(name="workflow-result")
 
             with patch("agentic_testgen.agents.agents.GitLabRepositoryManager") as manager_cls, patch(

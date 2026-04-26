@@ -103,7 +103,7 @@ class EvaluationTests(unittest.TestCase):
                 def run_from_local_path(self, *args, **kwargs):
                     return run_result
 
-            with patch("agentic_testgen.analysis.evaluation.DaddySubagentsReflectiveWorkflow", FakeWorkflow):
+            with patch("agentic_testgen.analysis.evaluation.OrchestratorWorkflow", FakeWorkflow):
                 results = ModelMatrixEvaluator(config).run(config_path)
 
             self.assertEqual(1, len(results))
@@ -201,7 +201,7 @@ class EvaluationTests(unittest.TestCase):
                     self.artifacts.append(str(path))
 
             FakeTracer.instances = []
-            with patch("agentic_testgen.analysis.evaluation.DaddySubagentsReflectiveWorkflow", FakeWorkflow), patch(
+            with patch("agentic_testgen.analysis.evaluation.OrchestratorWorkflow", FakeWorkflow), patch(
                 "agentic_testgen.analysis.evaluation.MlflowTracer", FakeTracer
             ):
                 ModelMatrixEvaluator(config).run(config_path)

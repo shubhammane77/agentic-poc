@@ -9,6 +9,8 @@ from agentic_testgen.core.config import AppConfig
 from agentic_testgen.analysis.coverage import CoverageAnalyzer
 from agentic_testgen.agents.custom_react import CustomReAct
 from agentic_testgen.agents.dspy_runtime import DSPyRuntime
+from agentic_testgen.agents.repo_analysis_agent import RepoAnalysisAgent
+from agentic_testgen.agents.test_writing_agent import TestWritingAgent
 from agentic_testgen.core.logging import RunLogger
 from agentic_testgen.execution.memory import MemoryManager
 from agentic_testgen.core.models import (
@@ -23,7 +25,7 @@ from agentic_testgen.integrations.tracing import MlflowTracer
 from agentic_testgen.core.utils import new_run_id, prompt_hash, read_json, utc_timestamp, write_json
 from agentic_testgen.execution.workspace import RunWorkspace
 
-PROMPT_VERSION = "daddy_subagents_reflective_v1"
+PROMPT_VERSION = "orchestrator_reflective_v1"
 
 
 class SubagentDispatcher:
@@ -162,26 +164,30 @@ class SubagentDispatcher:
             )
 
         prior_failures: list[str] = []
+        # failure_context carries the structured FailureAnalysisMessage JSON
+        # from TestWritingAgent back to RepoAnalysisAgent on each retry.
+        failure_context = ""
         memory_insights = self.memory.lessons_for_item(self._run_memory_path(workspace), repo_context, item)
         missed_code_snippets = self._missed_code_snippets(repo_context.clone_path, item)
+
+        # Build specialised agents once; they share the same toolset / ToolContext.
+        analysis_agent = RepoAnalysisAgent(
+            toolset=toolset,
+            repo_root=repo_context.clone_path,
+            max_iters=self.config.max_react_iters_analysis,
+        )
+        writing_agent = TestWritingAgent(
+            toolset=toolset,
+            repo_root=repo_context.clone_path,
+            max_iters=self.config.max_react_iters_subagent,
+        )
+
         for iteration in range(1, self.config.max_subagent_iterations + 1):
-            files_before_iteration = list(tool_context.written_files)
-            suggested_test_path = self._suggest_test_path(worktree_path, item.file_path, iteration)
-            objective = self._subagent_objective(
-                repo_context,
-                item,
-                suggested_test_path,
-                iteration,
-                prior_failures,
-                memory_insights,
-                coverage_context_path,
-                missed_code_snippets,
-            )
+            suggested_test_path = self._suggest_test_path(worktree_path, item.file_path, item.module, iteration)
             generated_file = ""
-            tool_summary = ""
-            validation_output = ""
             status = "failed"
             failure_analysis = ""
+
             with logger.step(
                 "subagent.iteration",
                 subagent_id=subagent_id,
@@ -189,94 +195,93 @@ class SubagentDispatcher:
                 iteration=iteration,
                 details={"suggested_test_path": suggested_test_path},
             ) as step:
-                react = CustomReAct(
-                    "objective, file_path, suggested_test_path -> answer",
-                    tools=toolset.build_dspy_tools(),
-                    max_iters=self.config.max_react_iters_subagent,
-                )
-                prediction = react(
-                    objective=objective,
+                # ── Phase 1: RepoAnalysisAgent ─────────────────────────────
+                # Read-only exploration; on retry, guided by failure_context.
+                with logger.step(
+                    "subagent.analysis",
+                    subagent_id=subagent_id,
                     file_path=item.file_path,
-                    suggested_test_path=suggested_test_path,
-                )
-                tracer.tag_last_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "workflow": "daddy_subagents_reflective",
-                        "dspy_call": "subagent.react",
-                        "subagent_id": subagent_id,
-                        "iteration": str(iteration),
-                        "file_path": item.file_path,
-                    }
-                )
-                trajectory = getattr(prediction, "trajectory", {})
-                logger.log_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "subagent_id": subagent_id,
-                        "iteration": iteration,
-                        "file_path": item.file_path,
-                        "objective": objective,
-                        "trajectory": trajectory,
-                        "answer": getattr(prediction, "answer", str(prediction)),
-                    }
-                )
-                iteration_files = [f for f in tool_context.written_files if f not in files_before_iteration]
-                iteration_created_test_count = 0
-                iteration_successful_test_count = 0
-                if iteration_files:
-                    best_file = iteration_files[0]
-                    best_passing = -1
-                    best_exit_code: int | None = None
-                    validation_output = ""
-                    candidate_metrics: list[tuple[int, int]] = []
-                    for candidate in iteration_files:
-                        created_count = tool_context.written_file_test_counts.get(candidate, 0)
-                        candidate_output = toolset.run_single_test(candidate)
-                        candidate_passing = tool_context.last_single_test_passing_count
-                        candidate_exit_code = tool_context.last_single_test_exit_code
-                        candidate_metrics.append((created_count, candidate_passing))
-                        if candidate_passing > best_passing:
-                            best_file = candidate
-                            best_passing = candidate_passing
-                            best_exit_code = candidate_exit_code
-                            validation_output = candidate_output
-                    (
-                        iteration_created_test_count,
-                        iteration_successful_test_count,
-                    ) = self._aggregate_iteration_test_counts(candidate_metrics)
-                    generated_file = best_file
-                    status = "passed" if best_exit_code == 0 else "failed"
-                else:
-                    generated_file = ""
-                    validation_output = "No test file was generated."
-                    status = "failed"
-                tool_summary = json.dumps(trajectory, default=str)[:4000]
-                reflective_summary = runtime.reflect(objective, validation_output, "\n".join(prior_failures))
-                tracer.tag_last_trace(
-                    {
-                        "run_id": repo_context.run_id,
-                        "workflow": "daddy_subagents_reflective",
-                        "dspy_call": "subagent.reflect",
-                        "subagent_id": subagent_id,
-                        "iteration": str(iteration),
-                        "file_path": item.file_path,
-                    }
-                )
-                if status != "passed":
-                    failure_analysis = runtime.analyze_failure(item.file_path, iteration, validation_output)
+                    iteration=iteration,
+                ) as analysis_step:
+                    analysis_summary = analysis_agent.run(
+                        file_path=item.file_path,
+                        failure_context=failure_context,
+                        memory_insights=memory_insights,
+                        missed_code_snippets=missed_code_snippets,
+                    )
                     tracer.tag_last_trace(
                         {
                             "run_id": repo_context.run_id,
-                            "workflow": "daddy_subagents_reflective",
-                            "dspy_call": "subagent.failure_analyst",
+                            "workflow": "orchestrator_reflective",
+                            "dspy_call": "subagent.analysis",
                             "subagent_id": subagent_id,
                             "iteration": str(iteration),
                             "file_path": item.file_path,
                         }
                     )
+                    analysis_step["summary"] = (
+                        f"Analysis complete — gaps: {bool(analysis_summary.coverage_gaps)}"
+                    )
+                    analysis_step["has_few_shot_examples"] = bool(analysis_summary.few_shot_examples)
+
+                # ── Phase 2: TestWritingAgent ──────────────────────────────
+                # Writes one test file and runs it; returns structured result.
+                with logger.step(
+                    "subagent.writing",
+                    subagent_id=subagent_id,
+                    file_path=item.file_path,
+                    iteration=iteration,
+                ) as writing_step:
+                    writing_result = writing_agent.run(
+                        analysis_summary=analysis_summary,
+                        file_path=item.file_path,
+                        suggested_test_path=suggested_test_path,
+                        iteration=iteration,
+                    )
+                    tracer.tag_last_trace(
+                        {
+                            "run_id": repo_context.run_id,
+                            "workflow": "orchestrator_reflective",
+                            "dspy_call": "subagent.writing",
+                            "subagent_id": subagent_id,
+                            "iteration": str(iteration),
+                            "file_path": item.file_path,
+                        }
+                    )
+                    writing_step["summary"] = f"Writing {writing_result.status}"
+                    writing_step["generated_file"] = writing_result.generated_file
+
+                generated_file = writing_result.generated_file
+                status = writing_result.status
+                validation_output = writing_result.validation_output
+                iteration_created_test_count = writing_result.created_test_count
+                iteration_successful_test_count = writing_result.successful_test_count
+
+                # ── Structured handoff: TestWritingAgent → RepoAnalysisAgent
+                if writing_result.failure_message is not None:
+                    failure_context = json.dumps(
+                        writing_result.failure_message.to_json(), default=str
+                    )
+                    failure_analysis = writing_result.failure_message.error_message
+                    logger.log_trace(
+                        {
+                            "run_id": repo_context.run_id,
+                            "subagent_id": subagent_id,
+                            "iteration": iteration,
+                            "file_path": item.file_path,
+                            "handoff": "TestWritingAgent -> RepoAnalysisAgent",
+                            "failure_message": writing_result.failure_message.to_json(),
+                        }
+                    )
                 else:
+                    failure_context = ""
                     failure_analysis = ""
+
+                tool_summary = json.dumps(
+                    analysis_summary.to_json(), default=str
+                )[:4000]
+                reflective_summary = (validation_output or failure_analysis or "")[:4000]
+
                 failure_memory = failure_analysis or (
                     validation_output.splitlines()[0] if validation_output else "Failure cause unavailable."
                 )
@@ -286,7 +291,7 @@ class SubagentDispatcher:
                     file_path=item.file_path,
                     iteration=iteration,
                     prompt_version=PROMPT_VERSION,
-                    prompt_hash=prompt_hash(objective),
+                    prompt_hash=prompt_hash(analysis_summary.to_context()),
                     tool_call_summary=tool_summary,
                     generated_test_file=generated_file or None,
                     single_test_command=" ".join(
@@ -302,7 +307,7 @@ class SubagentDispatcher:
                     failure_analysis=failure_analysis,
                     created_test_count=iteration_created_test_count,
                     successful_test_count=iteration_successful_test_count,
-                    candidate_count=len(iteration_files),
+                    candidate_count=max(1, len([f for f in tool_context.written_files if f == generated_file or not generated_file])),
                 )
                 attempts.append(attempt)
                 item.status = status
@@ -429,18 +434,23 @@ class SubagentDispatcher:
             missed_line_reduction=missed_line_reduction,
         )
 
-    def _suggest_test_path(self, worktree_root: Path, source_file_path: str, iteration: int) -> str:
+    def _suggest_test_path(self, worktree_root: Path, source_file_path: str, module: str, iteration: int) -> str:
         source = Path(source_file_path)
-        parts = list(source.parts)
+        module_root = Path(module) if module and module != "." else Path(".")
+        try:
+            relative_to_module = source.relative_to(module_root)
+        except ValueError:
+            relative_to_module = source
+        parts = list(relative_to_module.parts)
         if "main" in parts:
             parts[parts.index("main")] = "test"
-        elif "src" in parts:
-            parts = ["src", "test", "java", *parts[1:]]
+        else:
+            parts = ["src", "test", "java", *parts]
         if parts and parts[-1].endswith(".java"):
             parts[-1] = f"{Path(parts[-1]).stem}GeneratedTestIter{iteration}.java"
         else:
             parts.append(f"GeneratedTestIter{iteration}.java")
-        return str((worktree_root / Path(*parts)).resolve())
+        return str((worktree_root / module_root / Path(*parts)).resolve())
 
     def _subagent_objective(
         self,

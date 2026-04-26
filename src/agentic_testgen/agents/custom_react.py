@@ -49,13 +49,13 @@ class CustomReAct(Module):
             [
                 f"You are an Agent. In each episode, you will be given the fields {inputs} as input. And you can see your past trajectory so far.",
                 f"Your goal is to use one or more of the supplied tools to collect any necessary information for producing {outputs}.\n",
-                "To do this, you will interleave next_thought, next_tool_name, and next_tool_args in each turn, and also when finishing the task.",
+                "To do this, you will interleave suggested_thought, suggested_tool_name, and suggested_tool_args in each turn, and also when finishing the task.",
                 "After each tool call, you receive a resulting observation, which gets appended to your trajectory.\n",
-                "When writing next_thought, you may reason about the current situation and plan for future steps.",
-                "When selecting next_tool_name and next_tool_args, the tool must be one of:\n",
+                "When writing suggested_thought, you may reason about the current situation and plan for future steps.",
+                "When selecting suggested_tool_name and suggested_tool_args, the tool must be one of:\n",
             ]
         )
-
+                                                                    
         tool_map["finish"] = Tool(
             func=lambda: "Completed.",
             name="finish",
@@ -68,14 +68,14 @@ class CustomReAct(Module):
 
         for idx, tool in enumerate(tool_map.values()):
             instr.append(f"({idx + 1}) {tool}")
-        instr.append("When providing next_tool_args, the value must be valid JSON and parse into a dictionary.")
+        instr.append("When providing suggested_tool_args, the value must be valid JSON and parse into a dictionary.")
 
         react_signature = (
             dspy.Signature({**signature.input_fields}, "\n".join(instr))
             .append("trajectory", dspy.InputField(), type_=str)
-            .append("next_thought", dspy.OutputField(), type_=str)
-            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(tool_map.keys())])
-            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
+            .append("suggested_thought", dspy.OutputField(), type_=str)
+            .append("suggested_tool_name", dspy.OutputField(), type_=Literal[tuple(tool_map.keys())])
+            .append("suggested_tool_args", dspy.OutputField(), type_=dict[str, Any])
         )
         fallback_signature = dspy.Signature(
             {**signature.input_fields, **signature.output_fields},
@@ -92,12 +92,12 @@ class CustomReAct(Module):
         return adapter.format_user_message_content(trajectory_signature, trajectory)
 
     def _validate_react_prediction(self, pred: Any) -> None:
-        if not hasattr(pred, "next_tool_name") or not hasattr(pred, "next_tool_args"):
-            raise ValueError("Missing required fields `next_tool_name` and/or `next_tool_args`.")
-        if pred.next_tool_name not in self.tools:
-            raise ValueError(f"Unknown tool selected: {pred.next_tool_name}")
-        if not isinstance(pred.next_tool_args, dict):
-            raise ValueError("`next_tool_args` must be a JSON object (dict).")
+        if not hasattr(pred, "suggested_tool_name") or not hasattr(pred, "suggested_tool_args"):
+            raise ValueError("Missing required fields `suggested_tool_name` and/or `suggested_tool_args`.")
+        if pred.suggested_tool_name not in self.tools:
+            raise ValueError(f"Unknown tool selected: {pred.suggested_tool_name}")
+        if not isinstance(pred.suggested_tool_args, dict):
+            raise ValueError("`suggested_tool_args` must be a JSON object (dict).")
 
     def _call_with_potential_trajectory_truncation(self, module: Any, trajectory: dict[str, Any], **input_args: Any) -> Any:
         for _ in range(3):
@@ -153,16 +153,16 @@ class CustomReAct(Module):
                 logger.warning("Ending trajectory: agent failed to select a valid tool: %s", _fmt_exc(err))
                 break
 
-            trajectory[f"thought_{idx}"] = pred.next_thought
-            trajectory[f"tool_name_{idx}"] = pred.next_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.next_tool_args
+            trajectory[f"thought_{idx}"] = pred.suggested_thought
+            trajectory[f"tool_name_{idx}"] = pred.suggested_tool_name
+            trajectory[f"tool_args_{idx}"] = pred.suggested_tool_args
 
             try:
-                trajectory[f"observation_{idx}"] = self.tools[pred.next_tool_name](**pred.next_tool_args)
+                trajectory[f"observation_{idx}"] = self.tools[pred.suggested_tool_name](**pred.suggested_tool_args)
             except Exception as err:  # noqa: BLE001
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
+                trajectory[f"observation_{idx}"] = f"Execution error in {pred.suggested_tool_name}: {_fmt_exc(err)}"
 
-            if pred.next_tool_name == "finish":
+            if pred.suggested_tool_name == "finish":
                 break
 
         extract = self._call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
@@ -178,16 +178,16 @@ class CustomReAct(Module):
                 logger.warning("Ending trajectory: agent failed to select a valid tool: %s", _fmt_exc(err))
                 break
 
-            trajectory[f"thought_{idx}"] = pred.next_thought
-            trajectory[f"tool_name_{idx}"] = pred.next_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.next_tool_args
+            trajectory[f"thought_{idx}"] = pred.suggested_thought
+            trajectory[f"tool_name_{idx}"] = pred.suggested_tool_name
+            trajectory[f"tool_args_{idx}"] = pred.suggested_tool_args
 
             try:
-                trajectory[f"observation_{idx}"] = await self.tools[pred.next_tool_name].acall(**pred.next_tool_args)
+                trajectory[f"observation_{idx}"] = await self.tools[pred.suggested_tool_name].acall(**pred.suggested_tool_args)
             except Exception as err:  # noqa: BLE001
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.next_tool_name}: {_fmt_exc(err)}"
+                trajectory[f"observation_{idx}"] = f"Execution error in {pred.suggested_tool_name}: {_fmt_exc(err)}"
 
-            if pred.next_tool_name == "finish":
+            if pred.suggested_tool_name == "finish":
                 break
 
         extract = await self._async_call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)

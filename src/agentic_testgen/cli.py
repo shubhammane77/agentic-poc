@@ -4,7 +4,7 @@ from pathlib import Path
 
 import typer
 
-from agentic_testgen.agents.agents import DaddySubagentsReflectiveWorkflow
+from agentic_testgen.agents.agents import OrchestratorWorkflow
 from agentic_testgen.execution.tools import remove_merge_blockers
 from agentic_testgen.execution.checkpointing import CheckpointStore
 from agentic_testgen.core.config import AppConfig
@@ -31,7 +31,7 @@ def run(
     run_id: str | None = None,
     max_files: int | None = None,
 ) -> None:
-    """Run the daddy_subagents_reflective workflow against a GitLab repo."""
+    """Run the orchestrator_reflective workflow against a GitLab repo."""
     config = _config()
     effective_repo_path = repo_path or (Path(config.repo_path).expanduser() if config.repo_path else None)
     if effective_repo_path and repo_url:
@@ -39,7 +39,7 @@ def run(
     if effective_repo_path:
         if not effective_repo_path.exists() or not effective_repo_path.is_dir():
             raise typer.BadParameter(f"Invalid --repo-path: {effective_repo_path}")
-        workflow = DaddySubagentsReflectiveWorkflow(config)
+        workflow = OrchestratorWorkflow(config)
         result = workflow.run_from_local_path(
             effective_repo_path.resolve(),
             run_id=run_id,
@@ -60,7 +60,7 @@ def run(
     effective_repo_url = repo_url or config.repo_url
     if not effective_repo_url:
         raise typer.BadParameter("Provide --repo-path/--repo-url or set REPO_PATH/REPO_URL in .env")
-    workflow = DaddySubagentsReflectiveWorkflow(config)
+    workflow = OrchestratorWorkflow(config)
     result = workflow.run_from_gitlab(effective_repo_url, run_id=run_id, max_files=max_files)
     typer.echo(f"run_id={result.run_id}")
     typer.echo(f"overview={result.overview_path}")
@@ -122,7 +122,7 @@ def resume(run_id: str) -> None:
     pause_flag = workspace.control_dir / "pause.requested"
     if pause_flag.exists():
         pause_flag.unlink()
-    workflow = DaddySubagentsReflectiveWorkflow(config)
+    workflow = OrchestratorWorkflow(config)
     result = workflow.resume(run_id)
     typer.echo(f"resumed={result.run_id}")
     typer.echo(f"subagent_results={len(result.subagent_results)}")
@@ -187,7 +187,7 @@ def integrate(run_id: str, commit_hash: str | None = None) -> None:
     typer.echo(f"integrated={integrated}")
     typer.echo(f"remaining={len(remaining)}")
     if integrated > 0:
-        workflow = DaddySubagentsReflectiveWorkflow(config)
+        workflow = OrchestratorWorkflow(config)
         comparison = workflow.rerun_after_merge_coverage(run_id)
         if comparison:
             typer.echo(f"coverage_before={comparison.before.coverage_percent}")
