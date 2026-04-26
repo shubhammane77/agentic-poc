@@ -62,6 +62,12 @@ class AppConfig:
     workspace_root: Path = field(default_factory=workspace_default_root)
     model: ModelSettings = field(default_factory=ModelSettings)
     mlflow: MlflowSettings = field(default_factory=MlflowSettings)
+    # Self-improvement: which optimized prompt version to load at runtime.
+    # "" or "latest" → highest val score in the registry; "pinned" → registry
+    # pinned.json; specific version string → that exact version. None/missing
+    # → use the in-source default Signature instructions.
+    prompt_version_analysis: str = ""
+    prompt_version_writing: str = ""
 
     @classmethod
     def load(cls) -> "AppConfig":
@@ -100,6 +106,8 @@ class AppConfig:
                     else None
                 ),
             ),
+            prompt_version_analysis=os.getenv("PROMPT_VERSION_ANALYSIS", "").strip(),
+            prompt_version_writing=os.getenv("PROMPT_VERSION_WRITING", "").strip(),
             mlflow=MlflowSettings(
                 tracking_uri=os.getenv("MLFLOW_TRACKING_URI", "http://127.0.0.1:5000").strip(),
                 experiment_name=os.getenv("MLFLOW_EXPERIMENT_NAME", "agentic-testgen").strip(),

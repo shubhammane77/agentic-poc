@@ -8,12 +8,9 @@ Responsibilities:
      and return it so TwoAgentPipeline can hand it back to RepoAnalysisAgent.
   5. Repeat until the test passes or the caller's retry limit is reached.
 
-Absolute-path contract (same as RepoAnalysisAgent):
-  All file paths passed to tools MUST be absolute paths.
-  Unix  : starts with /   e.g. /home/user/project/src/test/java/FooTest.java
-  Windows: starts with a drive letter  e.g. C:\\Users\\user\\project\\...
-  Before every tool call, verify the path is absolute.  If it is not absolute,
-  prepend the repository root:  REPO_ROOT + '/' + relative_path.
+The system prompt now lives in `TestWritingSignature` (agents/signatures.py)
+so GEPA can mutate it during self-improvement. Per-call context (analysis
+summary, iteration index) flows through the `analysis_context` InputField.
 """
 
 from __future__ import annotations
@@ -28,34 +25,12 @@ except ImportError:  # pragma: no cover
     dspy = None  # type: ignore[assignment]
 
 from agentic_testgen.agents.custom_react import CustomReAct
+from agentic_testgen.agents.signatures import TestWritingSignature
 from agentic_testgen.core.models import AnalysisSummary, FailureAnalysisMessage
+from agentic_testgen.core.prompt_registry import PromptVersion
 from agentic_testgen.execution.tools import SafeToolset
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
-_SYSTEM_PROMPT = """\
-You are a Java unit-test writing agent working inside a Git worktree.
-You have been given an analysis summary produced by RepoAnalysisAgent.
-
-ABSOLUTE PATH REQUIREMENT:
-  All file paths passed to tools must be absolute paths.
-  Unix  : starts with /   e.g. /home/user/project/src/test/java/FooTest.java
-  Windows: starts with a drive letter  e.g. C:\\Users\\user\\project\\...
-  Before every tool call, verify the path is absolute.  If it is not absolute,
-  prepend the repository root:  REPO_ROOT + '/' + relative_path.
-
-Rules:
-  - Create only ONE new test file at the exact suggested_test_path (absolute).
-  - Do NOT modify any production source files.
-  - Do NOT modify any existing test files.
-  - Follow the test patterns and few-shot examples in the analysis summary.
-  - Target the coverage gaps listed in the analysis summary.
-  - After writing, call run_single_test with the absolute path of the test file.
-  - Do not call finish until after run_single_test has been called.
-"""
 
 
 # ---------------------------------------------------------------------------
@@ -91,10 +66,16 @@ class TestWritingAgent:
         toolset: SafeToolset,
         repo_root: Path,
         max_iters: int = 6,
+        signature: type | None = None,
+        prompt_version: PromptVersion | None = None,
     ) -> None:
         self.toolset = toolset
         self.repo_root = repo_root
         self.max_iters = max_iters
+        # Signature (mutable instructions) is injectable so GEPA-optimized
+        # variants can be loaded at runtime via the PromptRegistry.
+        self.signature = signature or TestWritingSignature
+        self.prompt_version = prompt_version
 
     # ------------------------------------------------------------------
     # Public interface
@@ -116,7 +97,7 @@ class TestWritingAgent:
                 written (pre-computed by SubagentDispatcher / TwoAgentPipeline).
             iteration: Current retry index (1-based), used in the prompt.
         """
-        if dspy is None:
+        if dspy is None or self.signature is None:
             return WritingResult(
                 status="failed",
                 generated_file="",
@@ -131,18 +112,20 @@ class TestWritingAgent:
             )
 
         files_before = list(self.toolset.context.written_files)
-        objective = self._build_objective(analysis_summary, file_path, suggested_test_path, iteration)
+        analysis_context = self._build_analysis_context(analysis_summary, iteration)
 
         try:
             react = CustomReAct(
-                "objective, file_path, suggested_test_path -> answer",
+                self.signature,
                 tools=self.toolset.build_writing_dspy_tools(),
                 max_iters=self.max_iters,
             )
+            if self.prompt_version is not None:
+                _apply_prompt_version(self.prompt_version, react)
             react(
-                objective=objective,
                 file_path=file_path,
                 suggested_test_path=suggested_test_path,
+                analysis_context=analysis_context,
             )
         except Exception as exc:
             logger.warning("TestWritingAgent react loop failed: %s", exc)
@@ -237,18 +220,13 @@ class TestWritingAgent:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _build_objective(
+    def _build_analysis_context(
         self,
         analysis_summary: AnalysisSummary,
-        file_path: str,
-        suggested_test_path: str,
         iteration: int,
     ) -> str:
         return (
-            f"{_SYSTEM_PROMPT}\n\n"
             f"Repository root (prefix for all paths): {self.repo_root}\n"
-            f"Source file: {file_path}\n"
-            f"Suggested test path (absolute, use exactly): {suggested_test_path}\n"
             f"Iteration: {iteration}\n\n"
             f"## Analysis Summary\n\n{analysis_summary.to_context()}"
         )
@@ -294,3 +272,16 @@ class TestWritingAgent:
                 error_message=validation_output[:500],
                 suspected_cause=str(exc),
             )
+
+
+def _apply_prompt_version(version: PromptVersion, module) -> None:
+    """Copy GEPA-evolved instructions onto a freshly built CustomReAct."""
+    named = dict(module.named_predictors())
+    for name, instructions in version.predictors.items():
+        pred = named.get(name)
+        if pred is None:
+            continue
+        try:
+            pred.signature = pred.signature.with_instructions(instructions)
+        except AttributeError:
+            pred.signature.instructions = instructions

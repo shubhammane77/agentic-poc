@@ -205,3 +205,126 @@ def evaluate(config_path: Path) -> None:
     typer.echo(f"cases={len(results)}")
     typer.echo(f"completed={sum(1 for item in results if item.status == 'completed')}")
     typer.echo(f"failed={sum(1 for item in results if item.status == 'failed')}")
+
+
+# ---------------------------------------------------------------------------
+# Self-improvement (GEPA) commands
+# ---------------------------------------------------------------------------
+
+@app.command(name="self-improve")
+def self_improve(
+    fixtures: Path = typer.Option(
+        Path("examples/model_matrix.toml"),
+        "--fixtures",
+        help="Path to a TOML file containing [[fixtures]] entries.",
+    ),
+    agent: str = typer.Option(
+        "writing",
+        "--agent",
+        help="Which agent prompt to optimize: analysis | writing.",
+    ),
+    auto: str = typer.Option(
+        "light",
+        "--auto",
+        help="GEPA budget preset: light | medium | heavy.",
+    ),
+    reflection_model: str | None = typer.Option(
+        None,
+        "--reflection-model",
+        help="Optional stronger model name for GEPA reflection (e.g. openai/gpt-4o).",
+    ),
+    seed: int = typer.Option(0, "--seed"),
+) -> None:
+    """Run one round of GEPA prompt optimization and persist the result."""
+    from agentic_testgen.agents.self_improve import SelfImprovementOrchestrator
+
+    if agent not in {"analysis", "writing"}:
+        raise typer.BadParameter("--agent must be 'analysis' or 'writing'")
+    if auto not in {"light", "medium", "heavy"}:
+        raise typer.BadParameter("--auto must be 'light' | 'medium' | 'heavy'")
+
+    config = _config()
+    project_root = Path.cwd()
+    orch = SelfImprovementOrchestrator(config, project_root)
+    summary = orch.improve(
+        fixtures_path=fixtures,
+        agent=agent,  # type: ignore[arg-type]
+        auto=auto,  # type: ignore[arg-type]
+        reflection_model=reflection_model,
+        seed=seed,
+    )
+    typer.echo(f"agent={summary.agent}")
+    typer.echo(f"version={summary.version}")
+    typer.echo(f"train_score={summary.train_score}")
+    typer.echo(f"val_score={summary.val_score}")
+    typer.echo(f"test_score={summary.test_score}")
+    typer.echo(f"artifact={summary.artifact_path}")
+
+
+prompts_app = typer.Typer(help="Inspect and pin GEPA-optimized prompts.")
+app.add_typer(prompts_app, name="prompts")
+
+
+def _registry() -> "PromptRegistry":  # type: ignore[name-defined]
+    from agentic_testgen.core.prompt_registry import PromptRegistry
+
+    config = _config()
+    return PromptRegistry(config.workspace_root / "prompts")
+
+
+@prompts_app.command("list")
+def prompts_list(agent: str = typer.Argument(...)) -> None:
+    """List saved prompt versions for an agent (analysis | writing)."""
+    if agent not in {"analysis", "writing"}:
+        raise typer.BadParameter("agent must be 'analysis' or 'writing'")
+    registry = _registry()
+    versions = registry.list(agent)  # type: ignore[arg-type]
+    if not versions:
+        typer.echo("(no versions)")
+        return
+    for v in versions:
+        scores = " ".join(f"{k}={v.scores.get(k)}" for k in ("train", "val", "test"))
+        typer.echo(f"{v.version}  {scores}  model={v.model_id}")
+
+
+@prompts_app.command("show")
+def prompts_show(agent: str, version: str) -> None:
+    """Show the full instructions stored under one version."""
+    if agent not in {"analysis", "writing"}:
+        raise typer.BadParameter("agent must be 'analysis' or 'writing'")
+    pv = _registry().load(agent, version)  # type: ignore[arg-type]
+    typer.echo(f"version={pv.version}")
+    typer.echo(f"agent={pv.agent}")
+    typer.echo(f"created_at={pv.created_at}")
+    typer.echo(f"scores={pv.scores}")
+    for name, instr in pv.predictors.items():
+        typer.echo(f"\n--- {name} ---\n{instr}")
+
+
+@prompts_app.command("pin")
+def prompts_pin(agent: str, version: str) -> None:
+    """Pin a specific version so runtime always loads it (set PROMPT_VERSION_*=pinned)."""
+    if agent not in {"analysis", "writing"}:
+        raise typer.BadParameter("agent must be 'analysis' or 'writing'")
+    path = _registry().pin(agent, version)  # type: ignore[arg-type]
+    typer.echo(f"pinned={path}")
+
+
+@prompts_app.command("diff")
+def prompts_diff(agent: str, a: str, b: str) -> None:
+    """Show a unified diff of predictor instructions between two versions."""
+    import difflib
+
+    if agent not in {"analysis", "writing"}:
+        raise typer.BadParameter("agent must be 'analysis' or 'writing'")
+    registry = _registry()
+    va = registry.load(agent, a)  # type: ignore[arg-type]
+    vb = registry.load(agent, b)  # type: ignore[arg-type]
+    keys = sorted(set(va.predictors) | set(vb.predictors))
+    for k in keys:
+        left = (va.predictors.get(k) or "").splitlines(keepends=False)
+        right = (vb.predictors.get(k) or "").splitlines(keepends=False)
+        diff = list(difflib.unified_diff(left, right, fromfile=f"{a}:{k}", tofile=f"{b}:{k}", lineterm=""))
+        if diff:
+            typer.echo("\n".join(diff))
+            typer.echo("")

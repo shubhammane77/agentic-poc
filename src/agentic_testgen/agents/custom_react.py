@@ -9,7 +9,7 @@ try:
     from dspy.adapters.types.tool import Tool
     from dspy.primitives.module import Module
     from dspy.signatures.signature import ensure_signature
-    from dspy.utils.exceptions import ContextWindowExceededError
+    from dspy.adapters.chat_adapter import ContextWindowExceededError
 except ImportError:  # pragma: no cover - optional runtime dependency
     dspy = None  # type: ignore[assignment]
     Tool = Any  # type: ignore[assignment,misc]

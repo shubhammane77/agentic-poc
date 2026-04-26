@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 
@@ -33,6 +34,7 @@ class SubagentDispatcher:
         self.config = config
         self.memory = memory
         self.coverage = coverage
+        self._clone_lock = threading.Lock()
 
     def dispatch(
         self,
@@ -171,15 +173,19 @@ class SubagentDispatcher:
         missed_code_snippets = self._missed_code_snippets(worktree_path, item)
 
         # Build specialised agents once; they share the same toolset / ToolContext.
+        analysis_pv = _resolve_prompt_version(self.config, "analysis")
+        writing_pv = _resolve_prompt_version(self.config, "writing")
         analysis_agent = RepoAnalysisAgent(
             toolset=toolset,
             repo_root=worktree_path,
             max_iters=self.config.max_react_iters_analysis,
+            prompt_version=analysis_pv,
         )
         writing_agent = TestWritingAgent(
             toolset=toolset,
             repo_root=worktree_path,
             max_iters=self.config.max_react_iters_subagent,
+            prompt_version=writing_pv,
         )
 
         for iteration in range(1, self.config.max_subagent_iterations + 1):
@@ -402,16 +408,17 @@ class SubagentDispatcher:
                 reason="Generated tests passed single-test validation",
                 priority_rank=item.priority_rank,
             )
-            if self.config.auto_integrate_successful_worktrees:
-                try:
-                    toolset.integrate_worktree_result(commit_hash)
-                    decision.status = "integrated"
-                    integration_status = "integrated"
-                except Exception as exc:
-                    decision.status = "integration_failed"
-                    decision.reason = str(exc)
-                    integration_status = "integration_failed"
-            self._append_integration(workspace, decision)
+            with self._clone_lock:
+                if self.config.auto_integrate_successful_worktrees:
+                    try:
+                        toolset.integrate_worktree_result(commit_hash)
+                        decision.status = "integrated"
+                        integration_status = "integrated"
+                    except Exception as exc:
+                        decision.status = "integration_failed"
+                        decision.reason = str(exc)
+                        integration_status = "integration_failed"
+                self._append_integration(workspace, decision)
         if not final_summary:
             latest_output = attempts[-1].failure_analysis if attempts and attempts[-1].failure_analysis else (
                 attempts[-1].failure_summary if attempts else "No attempts executed."
@@ -557,3 +564,31 @@ class SubagentDispatcher:
             created_total += normalized_created
             successful_total += min(normalized_created, normalized_passing)
         return created_total, successful_total
+
+
+def _resolve_prompt_version(config, agent: str):
+    """Look up the requested prompt version for *agent* from PromptRegistry.
+
+    Resolution order matches AppConfig.prompt_version_*:
+        ""        → none (use in-source default Signature)
+        "latest"  → registry.latest(agent)
+        "pinned"  → registry.pinned(agent)
+        otherwise → registry.load(agent, version)
+    Returns None on miss so agents fall back to the default Signature.
+    """
+    from agentic_testgen.core.prompt_registry import PromptRegistry
+
+    requested = (
+        config.prompt_version_analysis if agent == "analysis" else config.prompt_version_writing
+    )
+    if not requested:
+        return None
+    registry = PromptRegistry(config.workspace_root / "prompts")
+    if requested == "latest":
+        return registry.latest(agent)
+    if requested == "pinned":
+        return registry.pinned(agent)
+    try:
+        return registry.load(agent, requested)
+    except (FileNotFoundError, OSError):
+        return None
