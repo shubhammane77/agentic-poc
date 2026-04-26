@@ -41,9 +41,14 @@ _TESTS_RUN_RE = re.compile(
 _JUNIT_METHOD_ANNOTATIONS = {"Test", "ParameterizedTest", "RepeatedTest", "TestFactory", "TestTemplate"}
 _FOLDER_STRUCTURE_IGNORED_DIRS = {
     ".git",
+    ".idea",
+    ".gradle",
+    ".mvn",
     "target",
     "build",
     "out",
+    "classes",
+    "test-classes",
     "generated-resources",
     "generated-resorruces",
     "node_modules",

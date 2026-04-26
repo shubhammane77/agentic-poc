@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from typing import TYPE_CHECKING, Any, Callable, Literal
 
 try:
@@ -49,10 +50,11 @@ class CustomReAct(Module):
             [
                 f"You are an Agent. In each episode, you will be given the fields {inputs} as input. And you can see your past trajectory so far.",
                 f"Your goal is to use one or more of the supplied tools to collect any necessary information for producing {outputs}.\n",
-                "To do this, you will interleave suggested_thought, suggested_tool_name, and suggested_tool_args in each turn, and also when finishing the task.",
-                "After each tool call, you receive a resulting observation, which gets appended to your trajectory.\n",
-                "When writing suggested_thought, you may reason about the current situation and plan for future steps.",
-                "When selecting suggested_tool_name and suggested_tool_args, the tool must be one of:\n",
+                "The trajectory is a READ-ONLY log of prior calls. Never copy old action fields from the log as your next action.",
+                "For each turn, output only the NEXT action fields: next_thought, next_tool_name, and next_tool_args.",
+                "After each tool call, you receive a resulting observation, which gets appended to trajectory.\n",
+                "When writing next_thought, reason about what to do next.",
+                "When selecting next_tool_name and next_tool_args, choose from:\n",
             ]
         )
                                                                     
@@ -73,9 +75,9 @@ class CustomReAct(Module):
         react_signature = (
             dspy.Signature({**signature.input_fields}, "\n".join(instr))
             .append("trajectory", dspy.InputField(), type_=str)
-            .append("suggested_thought", dspy.OutputField(), type_=str)
-            .append("suggested_tool_name", dspy.OutputField(), type_=Literal[tuple(tool_map.keys())])
-            .append("suggested_tool_args", dspy.OutputField(), type_=dict[str, Any])
+            .append("next_thought", dspy.OutputField(), type_=str)
+            .append("next_tool_name", dspy.OutputField(), type_=Literal[tuple(tool_map.keys())])
+            .append("next_tool_args", dspy.OutputField(), type_=dict[str, Any])
         )
         fallback_signature = dspy.Signature(
             {**signature.input_fields, **signature.output_fields},
@@ -86,20 +88,45 @@ class CustomReAct(Module):
         self.react = dspy.Predict(react_signature)
         self.extract = dspy.ChainOfThought(fallback_signature)
 
-    def _format_trajectory(self, trajectory: dict[str, Any]) -> str:
-        adapter = dspy.settings.adapter or dspy.ChatAdapter()
-        trajectory_signature = dspy.Signature(f"{', '.join(trajectory.keys())} -> x")
-        return adapter.format_user_message_content(trajectory_signature, trajectory)
+    def _format_trajectory(self, trajectory: list[dict[str, Any]]) -> str:
+        if not trajectory:
+            return "No prior tool calls."
+        lines = [
+            "PRIOR TOOL TRAJECTORY (READ-ONLY HISTORY):",
+            "Use this only as context. Output only next_thought, next_tool_name, next_tool_args.",
+        ]
+        for idx, step in enumerate(trajectory, start=1):
+            tool_args = step.get("tool_args", {})
+            observation = str(step.get("observation", ""))
+            if len(observation) > 1500:
+                observation = observation[:1500] + "...<truncated>"
+            lines.extend(
+                [
+                    f"[STEP {idx}]",
+                    f"thought: {step.get('thought', '')}",
+                    f"tool_called: {step.get('tool_name', '')}",
+                    f"tool_args_json: {json.dumps(tool_args, default=str, ensure_ascii=True)}",
+                    f"observation: {observation}",
+                ]
+            )
+        return "\n".join(lines)
+
+    def _extract_action(self, pred: Any) -> tuple[str, str, dict[str, Any]]:
+        thought = getattr(pred, "next_thought", "")
+        tool_name = getattr(pred, "next_tool_name", "")
+        tool_args = getattr(pred, "next_tool_args", {})
+        return str(thought or ""), str(tool_name or ""), tool_args if isinstance(tool_args, dict) else {}
 
     def _validate_react_prediction(self, pred: Any) -> None:
-        if not hasattr(pred, "suggested_tool_name") or not hasattr(pred, "suggested_tool_args"):
-            raise ValueError("Missing required fields `suggested_tool_name` and/or `suggested_tool_args`.")
-        if pred.suggested_tool_name not in self.tools:
-            raise ValueError(f"Unknown tool selected: {pred.suggested_tool_name}")
-        if not isinstance(pred.suggested_tool_args, dict):
-            raise ValueError("`suggested_tool_args` must be a JSON object (dict).")
+        _thought, tool_name, tool_args = self._extract_action(pred)
+        if not tool_name:
+            raise ValueError("Missing required field `next_tool_name`.")
+        if tool_name not in self.tools:
+            raise ValueError(f"Unknown tool selected: {tool_name}")
+        if not isinstance(tool_args, dict):
+            raise ValueError("`next_tool_args` must be a JSON object (dict).")
 
-    def _call_with_potential_trajectory_truncation(self, module: Any, trajectory: dict[str, Any], **input_args: Any) -> Any:
+    def _call_with_potential_trajectory_truncation(self, module: Any, trajectory: list[dict[str, Any]], **input_args: Any) -> Any:
         for _ in range(3):
             try:
                 return module(**input_args, trajectory=self._format_trajectory(trajectory))
@@ -109,7 +136,7 @@ class CustomReAct(Module):
         raise ValueError("Context window exceeded even after truncating trajectory 3 times.")
 
     async def _async_call_with_potential_trajectory_truncation(
-        self, module: Any, trajectory: dict[str, Any], **input_args: Any
+        self, module: Any, trajectory: list[dict[str, Any]], **input_args: Any
     ) -> Any:
         for _ in range(3):
             try:
@@ -119,7 +146,7 @@ class CustomReAct(Module):
                 trajectory = self.truncate_trajectory(trajectory)
         raise ValueError("Context window exceeded even after truncating trajectory 3 times.")
 
-    def _predict_react_with_retry(self, trajectory: dict[str, Any], **input_args: Any) -> Any:
+    def _predict_react_with_retry(self, trajectory: list[dict[str, Any]], **input_args: Any) -> Any:
         last_error: Exception | None = None
         for attempt in range(1, self.max_format_retries + 1):
             try:
@@ -131,7 +158,7 @@ class CustomReAct(Module):
                 logger.warning("ReAct format/tool validation failed on attempt %s/%s: %s", attempt, self.max_format_retries, _fmt_exc(last_error))
         raise ValueError(f"Agent failed to produce a valid tool action after {self.max_format_retries} attempts: {last_error}")
 
-    async def _async_predict_react_with_retry(self, trajectory: dict[str, Any], **input_args: Any) -> Any:
+    async def _async_predict_react_with_retry(self, trajectory: list[dict[str, Any]], **input_args: Any) -> Any:
         last_error: Exception | None = None
         for attempt in range(1, self.max_format_retries + 1):
             try:
@@ -144,7 +171,7 @@ class CustomReAct(Module):
         raise ValueError(f"Agent failed to produce a valid tool action after {self.max_format_retries} attempts: {last_error}")
 
     def forward(self, **input_args: Any) -> Any:
-        trajectory: dict[str, Any] = {}
+        trajectory: list[dict[str, Any]] = []
         max_iters = input_args.pop("max_iters", self.max_iters)
         for idx in range(max_iters):
             try:
@@ -153,23 +180,31 @@ class CustomReAct(Module):
                 logger.warning("Ending trajectory: agent failed to select a valid tool: %s", _fmt_exc(err))
                 break
 
-            trajectory[f"thought_{idx}"] = pred.suggested_thought
-            trajectory[f"tool_name_{idx}"] = pred.suggested_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.suggested_tool_args
+            thought, tool_name, tool_args = self._extract_action(pred)
 
             try:
-                trajectory[f"observation_{idx}"] = self.tools[pred.suggested_tool_name](**pred.suggested_tool_args)
+                observation = self.tools[tool_name](**tool_args)
             except Exception as err:  # noqa: BLE001
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.suggested_tool_name}: {_fmt_exc(err)}"
+                observation = f"Execution error in {tool_name}: {_fmt_exc(err)}"
 
-            if pred.suggested_tool_name == "finish":
+            trajectory.append(
+                {
+                    "step": idx,
+                    "thought": thought,
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "observation": observation,
+                }
+            )
+
+            if tool_name == "finish":
                 break
 
         extract = self._call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
 
     async def aforward(self, **input_args: Any) -> Any:
-        trajectory: dict[str, Any] = {}
+        trajectory: list[dict[str, Any]] = []
         max_iters = input_args.pop("max_iters", self.max_iters)
         for idx in range(max_iters):
             try:
@@ -178,30 +213,35 @@ class CustomReAct(Module):
                 logger.warning("Ending trajectory: agent failed to select a valid tool: %s", _fmt_exc(err))
                 break
 
-            trajectory[f"thought_{idx}"] = pred.suggested_thought
-            trajectory[f"tool_name_{idx}"] = pred.suggested_tool_name
-            trajectory[f"tool_args_{idx}"] = pred.suggested_tool_args
+            thought, tool_name, tool_args = self._extract_action(pred)
 
             try:
-                trajectory[f"observation_{idx}"] = await self.tools[pred.suggested_tool_name].acall(**pred.suggested_tool_args)
+                observation = await self.tools[tool_name].acall(**tool_args)
             except Exception as err:  # noqa: BLE001
-                trajectory[f"observation_{idx}"] = f"Execution error in {pred.suggested_tool_name}: {_fmt_exc(err)}"
+                observation = f"Execution error in {tool_name}: {_fmt_exc(err)}"
 
-            if pred.suggested_tool_name == "finish":
+            trajectory.append(
+                {
+                    "step": idx,
+                    "thought": thought,
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "observation": observation,
+                }
+            )
+
+            if tool_name == "finish":
                 break
 
         extract = await self._async_call_with_potential_trajectory_truncation(self.extract, trajectory, **input_args)
         return dspy.Prediction(trajectory=trajectory, **extract)
 
-    def truncate_trajectory(self, trajectory: dict[str, Any]) -> dict[str, Any]:
-        keys = list(trajectory.keys())
-        if len(keys) < 4:
+    def truncate_trajectory(self, trajectory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if len(trajectory) < 2:
             raise ValueError(
                 "Trajectory exceeded context window but cannot be truncated because it only has one tool call."
             )
-        for key in keys[:4]:
-            trajectory.pop(key)
-        return trajectory
+        return trajectory[1:]
 
 
 def _fmt_exc(err: BaseException, *, limit: int = 5) -> str:

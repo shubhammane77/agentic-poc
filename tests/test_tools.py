@@ -173,6 +173,10 @@ class ToolWriteGuardTests(unittest.TestCase):
             (root / "generated-resorruces" / "x.txt").write_text("", encoding="utf-8")
             (root / "node_modules" / "lib.js").parent.mkdir(parents=True, exist_ok=True)
             (root / "node_modules" / "lib.js").write_text("", encoding="utf-8")
+            (root / "classes" / "Root.class").parent.mkdir(parents=True, exist_ok=True)
+            (root / "classes" / "Root.class").write_text("", encoding="utf-8")
+            (root / "test-classes" / "RootTest.class").parent.mkdir(parents=True, exist_ok=True)
+            (root / "test-classes" / "RootTest.class").write_text("", encoding="utf-8")
             toolset = self._toolset(root)
 
             output = toolset.read_folder_structure(".")
@@ -186,6 +190,8 @@ class ToolWriteGuardTests(unittest.TestCase):
             self.assertNotIn("generated-resources/", output)
             self.assertNotIn("generated-resorruces/", output)
             self.assertNotIn("node_modules/", output)
+            self.assertNotIn("classes/", output)
+            self.assertNotIn("test-classes/", output)
 
 
 if __name__ == "__main__":

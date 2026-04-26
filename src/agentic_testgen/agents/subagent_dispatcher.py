@@ -130,7 +130,7 @@ class SubagentDispatcher:
         worktree_path = workspace.worktrees_dir / subagent_id
         tool_context = ToolContext(
             run_id=repo_context.run_id,
-            repo_root=repo_context.clone_path,
+            repo_root=worktree_path,
             clone_root=repo_context.clone_path,
             worktrees_root=workspace.worktrees_dir,
             config=self.config,
@@ -168,17 +168,17 @@ class SubagentDispatcher:
         # from TestWritingAgent back to RepoAnalysisAgent on each retry.
         failure_context = ""
         memory_insights = self.memory.lessons_for_item(self._run_memory_path(workspace), repo_context, item)
-        missed_code_snippets = self._missed_code_snippets(repo_context.clone_path, item)
+        missed_code_snippets = self._missed_code_snippets(worktree_path, item)
 
         # Build specialised agents once; they share the same toolset / ToolContext.
         analysis_agent = RepoAnalysisAgent(
             toolset=toolset,
-            repo_root=repo_context.clone_path,
+            repo_root=worktree_path,
             max_iters=self.config.max_react_iters_analysis,
         )
         writing_agent = TestWritingAgent(
             toolset=toolset,
-            repo_root=repo_context.clone_path,
+            repo_root=worktree_path,
             max_iters=self.config.max_react_iters_subagent,
         )
 
