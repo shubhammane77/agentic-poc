@@ -111,15 +111,20 @@ def _parse_test_counts(output: str, module_root: Path, class_name: str) -> tuple
         passing = max(0, run - failures - errors - skipped)
         return run, passing
 
-    # -q suppresses the summary line when all tests pass; parse the XML instead
+    # -q suppresses the summary line when all tests pass; parse the XML instead.
+    # Attribute order varies by Surefire version (2.x vs 3.x), so search each independently.
     for xml_path in (module_root / "target" / "surefire-reports").glob(f"TEST-*{class_name}*.xml"):
         try:
             text = xml_path.read_text(encoding="utf-8")
-            m = re.search(r'<testsuite[^>]+tests="(\d+)"[^>]+failures="(\d+)"[^>]+errors="(\d+)"[^>]+skipped="(\d+)"', text)
-            if not m:
-                m = re.search(r'tests="(\d+)".*?failures="(\d+)".*?errors="(\d+)".*?skipped="(\d+)"', text)
-            if m:
-                run, failures, errors, skipped = (int(m.group(i)) for i in range(1, 5))
+            tests_m = re.search(r'tests="(\d+)"', text)
+            failures_m = re.search(r'failures="(\d+)"', text)
+            errors_m = re.search(r'errors="(\d+)"', text)
+            skipped_m = re.search(r'skipped="(\d+)"', text)
+            if tests_m and failures_m and errors_m and skipped_m:
+                run = int(tests_m.group(1))
+                failures = int(failures_m.group(1))
+                errors = int(errors_m.group(1))
+                skipped = int(skipped_m.group(1))
                 passing = max(0, run - failures - errors - skipped)
                 return run, passing
         except OSError:

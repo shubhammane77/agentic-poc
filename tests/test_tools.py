@@ -154,6 +154,38 @@ class ToolWriteGuardTests(unittest.TestCase):
             self.assertEqual(4, toolset.context.last_single_test_executed_count)
             self.assertEqual(2, toolset.context.last_single_test_passing_count)
 
+    def test_run_single_test_falls_back_to_surefire_xml_surefire3_attribute_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            module_root = root / "module-b"
+            test_path = module_root / "src" / "test" / "java" / "com" / "example" / "GeneratedTest.java"
+            surefire_dir = module_root / "target" / "surefire-reports"
+            test_path.parent.mkdir(parents=True, exist_ok=True)
+            surefire_dir.mkdir(parents=True, exist_ok=True)
+            (module_root / "pom.xml").write_text("<project/>", encoding="utf-8")
+            test_path.write_text("class GeneratedTest {}", encoding="utf-8")
+            # Surefire 3.x emits attributes in order: version, name, time, tests, errors, skipped, failures
+            (surefire_dir / "TEST-com.example.GeneratedTest.xml").write_text(
+                '<testsuite xmlns:xsi="..." version="3.0" name="com.example.GeneratedTest"'
+                ' time="0.031" tests="5" errors="0" skipped="1" failures="1"></testsuite>',
+                encoding="utf-8",
+            )
+            toolset = self._toolset(root)
+            with patch("agentic_testgen.execution.tools.run_command") as mocked_run, patch(
+                "agentic_testgen.execution.tools.write_command_logs",
+                return_value={},
+            ):
+                mocked_run.return_value = CommandResult(
+                    args=["mvn", "test"],
+                    exit_code=0,
+                    stdout="",
+                    stderr="",
+                    duration_seconds=0.01,
+                )
+                toolset.run_single_test(str(test_path))
+            self.assertEqual(5, toolset.context.last_single_test_executed_count)
+            self.assertEqual(3, toolset.context.last_single_test_passing_count)
+
     def test_read_folder_structure_ignores_build_and_resource_directories(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
